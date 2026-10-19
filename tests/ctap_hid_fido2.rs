@@ -230,7 +230,11 @@ fn extensions() {
     let attestation = key.fido.make_credential_with_args(&args).unwrap();
     let registered = verifier::verify_attestation(rpid, &challenge, &attestation);
     assert!(registered.is_success);
-    assert!(attestation.extensions.iter().any(|e| matches!(e, Mext::HmacSecret(Some(true)))), "{:?}", attestation.extensions);
+    assert!(
+        attestation.extensions.iter().any(|e| matches!(e, Mext::HmacSecret(Some(true)))),
+        "{:?}",
+        attestation.extensions
+    );
 
     // hmac-secret outputs are stable for a salt; credBlob comes back as stored.
     let get = |salt: &str| {
@@ -285,9 +289,15 @@ fn credential_management() {
     let target = creds.iter().find(|c| c.public_key_credential_user_entity.id == b"b1").unwrap();
     let renamed = PublicKeyCredentialUserEntity::new(Some(b"b1"), Some("renamed"), Some("Renamed User"));
     key.fido
-        .credential_management_update_user_information(Some(PIN), target.public_key_credential_descriptor.clone(), renamed)
+        .credential_management_update_user_information(
+            Some(PIN),
+            target.public_key_credential_descriptor.clone(),
+            renamed,
+        )
         .unwrap();
-    key.fido.credential_management_delete_credential(Some(PIN), target.public_key_credential_descriptor.clone()).unwrap();
+    key.fido
+        .credential_management_delete_credential(Some(PIN), target.public_key_credential_descriptor.clone())
+        .unwrap();
     let creds = key.fido.credential_management_enumerate_credentials(Some(PIN), &b.rpid_hash).unwrap();
     assert_eq!(creds.len(), 1);
     assert_eq!(creds[0].public_key_credential_user_entity.id, b"b2");

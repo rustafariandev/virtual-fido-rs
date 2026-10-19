@@ -46,9 +46,7 @@ pub fn decode_map(data: &[u8]) -> Result<Map, Status> {
 
 /// Value for integer key `key`.
 pub fn get(map: &[(Value, Value)], key: i64) -> Option<&Value> {
-    map.iter()
-        .find(|(k, _)| matches!(k, Value::Integer(i) if i128::from(*i) == key as i128))
-        .map(|(_, v)| v)
+    map.iter().find(|(k, _)| matches!(k, Value::Integer(i) if i128::from(*i) == key as i128)).map(|(_, v)| v)
 }
 
 /// Value for text key `key`.

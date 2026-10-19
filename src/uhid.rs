@@ -67,8 +67,12 @@ pub enum Event {
     Close,
     /// An output report from the host, without the report-number prefix.
     Output(Vec<u8>),
-    GetReport { id: u32 },
-    SetReport { id: u32 },
+    GetReport {
+        id: u32,
+    },
+    SetReport {
+        id: u32,
+    },
     Other(u32),
 }
 

@@ -98,9 +98,6 @@ pub fn from_name(name: &str, timeout: Duration) -> Result<Arc<dyn PresenceProvid
         "terminal" => Ok(Arc::new(TerminalPresence::new(timeout))),
         #[cfg(feature = "notify")]
         "notify" => Ok(Arc::new(NotifyPresence::new(timeout))),
-        other => Err(Error::Config(format!(
-            "unknown presence backend {other:?} (available: {})",
-            BACKENDS.join(", ")
-        ))),
+        other => Err(Error::Config(format!("unknown presence backend {other:?} (available: {})", BACKENDS.join(", ")))),
     }
 }

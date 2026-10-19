@@ -156,14 +156,7 @@ impl Server {
         }
 
         let n = len.min(INIT_DATA);
-        let partial = Partial {
-            cid,
-            cmd,
-            len,
-            data: pkt[7..7 + n].to_vec(),
-            next_seq: 0,
-            started: Instant::now(),
-        };
+        let partial = Partial { cid, cmd, len, data: pkt[7..7 + n].to_vec(), next_seq: 0, started: Instant::now() };
         if partial.data.len() == len {
             self.dispatch(cid, cmd, partial.data);
         } else {

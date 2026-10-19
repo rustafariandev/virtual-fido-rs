@@ -151,8 +151,5 @@ pub fn generate_attestation() -> Result<AttestationMaterial> {
 
     let secret = p256::SecretKey::from_pkcs8_der(&key_pair.serialize_der())
         .map_err(|e| Error::Crypto(format!("attestation key: {e}")))?;
-    Ok(AttestationMaterial {
-        private_key: secret.to_bytes().to_vec(),
-        certificate: cert.der().to_vec(),
-    })
+    Ok(AttestationMaterial { private_key: secret.to_bytes().to_vec(), certificate: cert.der().to_vec() })
 }

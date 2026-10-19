@@ -147,9 +147,11 @@ fn relying_parties(auth: &Authenticator) -> Result<Vec<RpEntry>, Status> {
     creds.sort_by_key(|c| c.created);
     let mut rps: BTreeMap<String, RpEntry> = BTreeMap::new();
     for c in creds {
-        let entry = rps
-            .entry(c.rp_id.clone())
-            .or_insert_with(|| RpEntry { id: c.rp_id.clone(), name: None, hash: c.rp_id_hash });
+        let entry = rps.entry(c.rp_id.clone()).or_insert_with(|| RpEntry {
+            id: c.rp_id.clone(),
+            name: None,
+            hash: c.rp_id_hash,
+        });
         if c.rp_name.is_some() {
             entry.name = c.rp_name.clone();
         }

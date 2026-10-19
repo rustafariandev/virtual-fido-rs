@@ -291,7 +291,11 @@ fn rejects_unsupported_algorithms_and_uv() {
         (int(4), Value::Array(vec![map(vec![(text("alg"), int(-35)), (text("type"), text("public-key"))])])),
     ]);
     assert_eq!(c.ctap2(0x01, Some(params)).0, 0x26, "ES384 is not supported");
-    let params = map(vec![(int(1), text("example.com")), (int(2), bytes(&[0; 32])), (int(5), map(vec![(text("uv"), Value::Bool(true))]))]);
+    let params = map(vec![
+        (int(1), text("example.com")),
+        (int(2), bytes(&[0; 32])),
+        (int(5), map(vec![(text("uv"), Value::Bool(true))])),
+    ]);
     assert_eq!(c.ctap2(0x02, Some(params)).0, 0x2C, "no built-in UV");
     assert_eq!(c.ctap2(0x42, None).0, 0x01);
 }
@@ -416,7 +420,12 @@ fn file_store_persists_and_checks_passphrase() {
 
 impl Client {
     /// clientPIN request; `entries` excludes the protocol and subcommand.
-    fn client_pin(&mut self, protocol: PinProtocol, sub: i64, mut entries: Vec<(Value, Value)>) -> (u8, Vec<(Value, Value)>) {
+    fn client_pin(
+        &mut self,
+        protocol: PinProtocol,
+        sub: i64,
+        mut entries: Vec<(Value, Value)>,
+    ) -> (u8, Vec<(Value, Value)>) {
         entries.push((int(1), int(protocol.id())));
         entries.push((int(2), int(sub)));
         self.ctap2(0x06, Some(map(entries)))
@@ -443,7 +452,12 @@ impl Client {
         let pin_hash_enc = protocol.encrypt(&secret, &sha256(old.as_bytes())[..16]);
         let new_pin_enc = protocol.encrypt(&secret, &pad_pin(new));
         let pin_auth = protocol.authenticate_with_secret(&secret, &[&new_pin_enc[..], &pin_hash_enc].concat());
-        let entries = vec![(int(3), cose), (int(4), bytes(&pin_auth)), (int(5), bytes(&new_pin_enc)), (int(6), bytes(&pin_hash_enc))];
+        let entries = vec![
+            (int(3), cose),
+            (int(4), bytes(&pin_auth)),
+            (int(5), bytes(&new_pin_enc)),
+            (int(6), bytes(&pin_hash_enc)),
+        ];
         self.client_pin(protocol, 4, entries).0
     }
 
@@ -459,7 +473,13 @@ impl Client {
     }
 
     /// getPinUvAuthTokenUsingPinWithPermissions (CTAP 2.1).
-    fn pin_token_with(&mut self, protocol: PinProtocol, pin: &str, permissions: u8, rp_id: Option<&str>) -> Result<Vec<u8>, u8> {
+    fn pin_token_with(
+        &mut self,
+        protocol: PinProtocol,
+        pin: &str,
+        permissions: u8,
+        rp_id: Option<&str>,
+    ) -> Result<Vec<u8>, u8> {
         let (cose, secret) = self.key_agreement(protocol);
         let pin_hash_enc = protocol.encrypt(&secret, &sha256(pin.as_bytes())[..16]);
         let mut entries = vec![(int(3), cose), (int(6), bytes(&pin_hash_enc)), (int(9), int(permissions.into()))];
@@ -505,7 +525,8 @@ fn pin_set_use_and_change() {
         let mut c = Client::new(Arc::new(AutoPresence));
         assert!(!c.client_pin_option());
         let (_, info) = c.ctap2(0x04, None);
-        let protocols: Vec<i128> = get(&info, 6).unwrap().as_array().unwrap().iter().map(|v| v.as_integer().unwrap().into()).collect();
+        let protocols: Vec<i128> =
+            get(&info, 6).unwrap().as_array().unwrap().iter().map(|v| v.as_integer().unwrap().into()).collect();
         assert_eq!(protocols, [2, 1]);
         assert_eq!(c.pin_token(protocol, "1234"), Err(0x35), "no PIN yet");
 
@@ -533,7 +554,10 @@ fn pin_set_use_and_change() {
         let (status, resp) = c.ctap2(0x02, Some(get_assertion_params("example.com", &cdh, &[])));
         assert_eq!(status, 0);
         assert_eq!(get(&resp, 2).unwrap().as_bytes().unwrap()[32], 0x01);
-        let (status, resp) = c.ctap2(0x02, Some(with_pin_auth(get_assertion_params("example.com", &cdh, &[]), (6, 7), protocol, &token, &cdh)));
+        let (status, resp) = c.ctap2(
+            0x02,
+            Some(with_pin_auth(get_assertion_params("example.com", &cdh, &[]), (6, 7), protocol, &token, &cdh)),
+        );
         assert_eq!(status, 0);
         assert_eq!(get(&resp, 2).unwrap().as_bytes().unwrap()[32], 0x05);
         verify_assertion(&cred.key, &resp, &cdh);
@@ -639,7 +663,12 @@ impl Client {
         }
         let ext = map(vec![(
             text("hmac-secret"),
-            map(vec![(int(1), cose), (int(2), bytes(&salt_enc)), (int(3), bytes(&salt_auth)), (int(4), int(protocol.id()))]),
+            map(vec![
+                (int(1), cose),
+                (int(2), bytes(&salt_enc)),
+                (int(3), bytes(&salt_auth)),
+                (int(4), int(protocol.id())),
+            ]),
         )]);
         let cdh = [0x66; 32];
         let mut params = with_extensions(get_assertion_params("example.com", &cdh, &[]), 4, ext);
@@ -730,8 +759,12 @@ fn hmac_secret_with_multiple_credentials() {
     let (cose, secret) = c.key_agreement(p);
     let salt_enc = p.encrypt(&secret, &[7u8; 32]);
     let salt_auth = p.authenticate_with_secret(&secret, &salt_enc);
-    let ext = map(vec![(text("hmac-secret"), map(vec![(int(1), cose), (int(2), bytes(&salt_enc)), (int(3), bytes(&salt_auth)), (int(4), int(2))]))]);
-    let (status, first) = c.ctap2(0x02, Some(with_extensions(get_assertion_params("example.com", &[0; 32], &[]), 4, ext)));
+    let ext = map(vec![(
+        text("hmac-secret"),
+        map(vec![(int(1), cose), (int(2), bytes(&salt_enc)), (int(3), bytes(&salt_auth)), (int(4), int(2))]),
+    )]);
+    let (status, first) =
+        c.ctap2(0x02, Some(with_extensions(get_assertion_params("example.com", &[0; 32], &[]), 4, ext)));
     assert_eq!(status, 0);
     let (flags, ext) = auth_data_extensions(get(&first, 2).unwrap().as_bytes().unwrap());
     assert_eq!(flags, 0x81, "newest (hmac-secret) credential first");
@@ -746,7 +779,13 @@ fn hmac_secret_with_multiple_credentials() {
 // ---- credProtect ------------------------------------------------------------------
 
 /// Creates a resident credential with credProtect `level` (and optionally hmac-secret).
-fn protected_credential(c: &mut Client, user: &[u8], level: i64, hmac: bool, pin: Option<(PinProtocol, &[u8])>) -> (u8, Option<NewCredential>, Option<Value>) {
+fn protected_credential(
+    c: &mut Client,
+    user: &[u8],
+    level: i64,
+    hmac: bool,
+    pin: Option<(PinProtocol, &[u8])>,
+) -> (u8, Option<NewCredential>, Option<Value>) {
     let mut ext = vec![(text("credProtect"), int(level))];
     if hmac {
         ext.push((text("hmac-secret"), Value::Bool(true)));
@@ -843,7 +882,13 @@ fn cred_protect_levels() {
 impl Client {
     /// credentialManagement request (command `cmd`: 0x0A or the 0x41 prototype),
     /// authenticated with `token` unless it is None.
-    fn cred_mgmt(&mut self, cmd: u8, sub: i64, params: Option<Value>, token: Option<(PinProtocol, &[u8])>) -> (u8, Vec<(Value, Value)>) {
+    fn cred_mgmt(
+        &mut self,
+        cmd: u8,
+        sub: i64,
+        params: Option<Value>,
+        token: Option<(PinProtocol, &[u8])>,
+    ) -> (u8, Vec<(Value, Value)>) {
         let mut entries = vec![(int(1), int(sub))];
         let mut msg = vec![sub as u8];
         if let Some(p) = params {
@@ -935,7 +980,8 @@ fn credential_management() {
         (int(3), map(vec![(text("id"), bytes(b"u1")), (text("displayName"), text("Alice A."))])),
     ]);
     assert_eq!(c.cred_mgmt(0x0A, 7, Some(update), auth).0, 0);
-    let wrong_user = map(vec![(int(2), credential_descriptor(&alice.id)), (int(3), map(vec![(text("id"), bytes(b"zz"))]))]);
+    let wrong_user =
+        map(vec![(int(2), credential_descriptor(&alice.id)), (int(3), map(vec![(text("id"), bytes(b"zz"))]))]);
     assert_eq!(c.cred_mgmt(0x0A, 7, Some(wrong_user), auth).0, 0x02);
 
     // Delete bob; alice remains with her new name.
@@ -993,7 +1039,13 @@ impl Client {
         }
     }
 
-    fn blob_write_fragment(&mut self, offset: usize, fragment: &[u8], total: Option<usize>, token: Option<(PinProtocol, &[u8])>) -> u8 {
+    fn blob_write_fragment(
+        &mut self,
+        offset: usize,
+        fragment: &[u8],
+        total: Option<usize>,
+        token: Option<(PinProtocol, &[u8])>,
+    ) -> u8 {
         let mut entries = vec![(int(2), bytes(fragment)), (int(3), int(offset as i64))];
         if let Some(t) = total {
             entries.push((int(4), int(t as i64)));
@@ -1081,10 +1133,15 @@ fn large_blob_keys() {
     let lbk = || map(vec![(text("largeBlobKey"), Value::Bool(true))]);
     let non_resident = with_extensions(make_credential_params("example.com", b"u", "u", false, &[]), 6, lbk());
     assert_eq!(c.ctap2(0x01, Some(non_resident)).0, 0x2C, "resident keys only");
-    let bad = with_extensions(make_credential_params("example.com", b"u", "u", true, &[]), 6, map(vec![(text("largeBlobKey"), Value::Bool(false))]));
+    let bad = with_extensions(
+        make_credential_params("example.com", b"u", "u", true, &[]),
+        6,
+        map(vec![(text("largeBlobKey"), Value::Bool(false))]),
+    );
     assert_eq!(c.ctap2(0x01, Some(bad)).0, 0x2C);
 
-    let (status, resp) = c.ctap2(0x01, Some(with_extensions(make_credential_params("example.com", b"u", "u", true, &[]), 6, lbk())));
+    let (status, resp) =
+        c.ctap2(0x01, Some(with_extensions(make_credential_params("example.com", b"u", "u", true, &[]), 6, lbk())));
     assert_eq!(status, 0);
     let key = get(&resp, 5).unwrap().as_bytes().unwrap().clone();
     assert_eq!(key.len(), 32);
@@ -1094,7 +1151,8 @@ fn large_blob_keys() {
     let cdh = [0; 32];
     let (_, plain) = c.ctap2(0x02, Some(get_assertion_params("example.com", &cdh, &[])));
     assert!(get(&plain, 7).is_none(), "only when asked");
-    let (status, resp) = c.ctap2(0x02, Some(with_extensions(get_assertion_params("example.com", &cdh, &[&cred.id]), 4, lbk())));
+    let (status, resp) =
+        c.ctap2(0x02, Some(with_extensions(get_assertion_params("example.com", &cdh, &[&cred.id]), 4, lbk())));
     assert_eq!(status, 0);
     assert_eq!(get(&resp, 7).unwrap().as_bytes().unwrap(), &key);
 
@@ -1116,7 +1174,8 @@ fn cred_blob() {
     let (_, info) = c.ctap2(0x04, None);
     assert_eq!(get(&info, 0x0F), Some(&int(32)), "maxCredBlobLength");
     let create = |c: &mut Client, user: &[u8], rk: bool, ext: Value| {
-        let (status, resp) = c.ctap2(0x01, Some(with_extensions(make_credential_params("example.com", user, "u", rk, &[]), 6, ext)));
+        let (status, resp) =
+            c.ctap2(0x01, Some(with_extensions(make_credential_params("example.com", user, "u", rk, &[]), 6, ext)));
         assert_eq!(status, 0);
         let ext = auth_data_extensions(get(&resp, 2).unwrap().as_bytes().unwrap()).1;
         (parse_make_credential("example.com", &resp), ext)
@@ -1131,7 +1190,12 @@ fn cred_blob() {
     let (too_long, ext) = create(&mut c, b"t", false, map(vec![(text("credBlob"), bytes(&[0; 33]))]));
     assert_eq!(ext, Some(map(vec![(text("credBlob"), Value::Bool(false))])));
     // Combined with hmac-secret, both outputs share one map.
-    let (_, ext) = create(&mut c, b"h", false, map(vec![(text("hmac-secret"), Value::Bool(true)), (text("credBlob"), bytes(b"x"))]));
+    let (_, ext) = create(
+        &mut c,
+        b"h",
+        false,
+        map(vec![(text("hmac-secret"), Value::Bool(true)), (text("credBlob"), bytes(b"x"))]),
+    );
     assert_eq!(ext, Some(map(vec![(text("credBlob"), Value::Bool(true)), (text("hmac-secret"), Value::Bool(true))])));
 
     let cdh = [0; 32];
@@ -1144,12 +1208,23 @@ fn cred_blob() {
         assert_eq!(status, 0);
         auth_data_extensions(get(&resp, 2).unwrap().as_bytes().unwrap())
     };
-    assert_eq!(get_blob(&mut c, &resident.id, true), (0x81, Some(map(vec![(text("credBlob"), bytes(b"resident blob"))]))));
+    assert_eq!(
+        get_blob(&mut c, &resident.id, true),
+        (0x81, Some(map(vec![(text("credBlob"), bytes(b"resident blob"))])))
+    );
     assert_eq!(get_blob(&mut c, &plain.id, true).1, Some(map(vec![(text("credBlob"), bytes(&[9; 32]))])));
-    assert_eq!(get_blob(&mut c, &too_long.id, true).1, Some(map(vec![(text("credBlob"), bytes(b""))])), "empty when none stored");
+    assert_eq!(
+        get_blob(&mut c, &too_long.id, true).1,
+        Some(map(vec![(text("credBlob"), bytes(b""))])),
+        "empty when none stored"
+    );
     assert_eq!(get_blob(&mut c, &resident.id, false), (0x01, None), "only when asked");
 
-    let bad = with_extensions(make_credential_params("example.com", b"b", "u", true, &[]), 6, map(vec![(text("credBlob"), Value::Bool(true))]));
+    let bad = with_extensions(
+        make_credential_params("example.com", b"b", "u", true, &[]),
+        6,
+        map(vec![(text("credBlob"), Value::Bool(true))]),
+    );
     assert_eq!(c.ctap2(0x01, Some(bad)).0, 0x11, "credBlob must be bytes");
 }
 
@@ -1174,7 +1249,12 @@ fn parse_ed25519_credential(resp: &[(Value, Value)]) -> (Vec<u8>, ed25519_dalek:
     let cose: Value = ciborium::de::from_reader(&mut rest).unwrap();
     assert_eq!(
         cose,
-        map(vec![(int(1), int(1)), (int(3), int(-8)), (int(-1), int(6)), (int(-2), get(cose.as_map().unwrap(), -2).unwrap().clone())]),
+        map(vec![
+            (int(1), int(1)),
+            (int(3), int(-8)),
+            (int(-1), int(6)),
+            (int(-2), get(cose.as_map().unwrap(), -2).unwrap().clone())
+        ]),
         "OKP / EdDSA / Ed25519 COSE key"
     );
     let x: [u8; 32] = get(cose.as_map().unwrap(), -2).unwrap().as_bytes().unwrap().as_slice().try_into().unwrap();
@@ -1182,7 +1262,8 @@ fn parse_ed25519_credential(resp: &[(Value, Value)]) -> (Vec<u8>, ed25519_dalek:
 
     let att = get(resp, 3).unwrap().as_map().unwrap();
     assert_eq!(get_text(att, "alg"), Some(&int(-8)));
-    let sig: [u8; 64] = get_text(att, "sig").unwrap().as_bytes().unwrap().as_slice().try_into().expect("raw 64-byte signature");
+    let sig: [u8; 64] =
+        get_text(att, "sig").unwrap().as_bytes().unwrap().as_slice().try_into().expect("raw 64-byte signature");
     key.verify(&[ad, &[0x11u8; 32][..]].concat(), &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
     (id, key)
 }
@@ -1192,7 +1273,13 @@ fn ed25519_credentials() {
     use ed25519_dalek::Verifier;
     let mut c = Client::new(Arc::new(AutoPresence));
     let (_, info) = c.ctap2(0x04, None);
-    let algs: Vec<_> = get(&info, 0x0A).unwrap().as_array().unwrap().iter().map(|a| get_text(a.as_map().unwrap(), "alg").unwrap().clone()).collect();
+    let algs: Vec<_> = get(&info, 0x0A)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| get_text(a.as_map().unwrap(), "alg").unwrap().clone())
+        .collect();
     assert_eq!(algs, [int(-7), int(-8)]);
 
     // The RP's first supported preference wins.
@@ -1221,7 +1308,8 @@ fn ed25519_credentials() {
 
     // U2F can only produce P-256 signatures, so the Ed25519 credential is unknown to it.
     let app = sha256(b"example.com");
-    let apdu = |kh: &[u8]| [&[0, 2, 0x07, 0, (65 + kh.len()) as u8][..], &[0; 32], &app, &[kh.len() as u8], kh].concat();
+    let apdu =
+        |kh: &[u8]| [&[0, 2, 0x07, 0, (65 + kh.len()) as u8][..], &[0; 32], &app, &[kh.len() as u8], kh].concat();
     assert_eq!(c.u2f(&apdu(&id)).1, 0x6A80);
     assert_eq!(c.u2f(&apdu(&ec.id)).1, 0x6985);
 
@@ -1335,8 +1423,15 @@ fn ctap21_token_permissions_and_rp_binding() {
     assert_eq!(status, 0);
     let b_id = get(&b_list, 7).unwrap().clone();
     let token = c.pin_token_with(p, "1234", PERM_CM, Some("a.example")).unwrap();
-    assert_eq!(c.cred_mgmt(0x0A, 6, Some(map(vec![(int(2), b_id)])), Some((p, &token))).0, 0x33, "delete on another RP");
-    assert_eq!(c.cred_mgmt(0x0A, 6, Some(map(vec![(int(2), credential_descriptor(&a_cred.id))])), Some((p, &token))).0, 0);
+    assert_eq!(
+        c.cred_mgmt(0x0A, 6, Some(map(vec![(int(2), b_id)])), Some((p, &token))).0,
+        0x33,
+        "delete on another RP"
+    );
+    assert_eq!(
+        c.cred_mgmt(0x0A, 6, Some(map(vec![(int(2), credential_descriptor(&a_cred.id))])), Some((p, &token))).0,
+        0
+    );
 
     // getPinToken may not carry 2.1 parameters.
     let (cose, secret) = c.key_agreement(p);

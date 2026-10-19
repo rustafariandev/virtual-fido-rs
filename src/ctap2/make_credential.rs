@@ -1,4 +1,6 @@
-use super::cbor::{self, as_array, as_bool, as_bytes, as_int, as_map, as_text, bytes, get, get_text, int, map, require, text};
+use super::cbor::{
+    self, as_array, as_bool, as_bytes, as_int, as_map, as_text, bytes, get, get_text, int, map, require, text,
+};
 use super::client_pin::{verify_pin_uv_auth, PERM_MAKE_CREDENTIAL};
 use super::{config, cred_blob, cred_mgmt, cred_protect, hmac_secret, large_blobs};
 use super::{CmdResult, Status, FLAG_AT, FLAG_ED, FLAG_UP, FLAG_UV};

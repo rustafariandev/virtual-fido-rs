@@ -151,7 +151,11 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8]) -> CmdResult {
     }
 }
 
-fn shared_secret(auth: &Authenticator, protocol: PinProtocol, m: &[(Value, Value)]) -> Result<Zeroizing<Vec<u8>>, Status> {
+fn shared_secret(
+    auth: &Authenticator,
+    protocol: PinProtocol,
+    m: &[(Value, Value)],
+) -> Result<Zeroizing<Vec<u8>>, Status> {
     auth.pin.shared_secret(protocol, require(get(m, 0x03))?)
 }
 
@@ -222,7 +226,12 @@ fn new_pin_state(pin: &[u8], code_points: u8) -> PinState {
 /// Checks an encrypted PIN hash against the stored one, maintaining the retry counters.
 /// The persistent counter is decremented *before* comparing, so killing the process
 /// mid-check cannot yield a free guess.
-fn check_pin_hash(auth: &mut Authenticator, protocol: PinProtocol, secret: &[u8], pin_hash_enc: &[u8]) -> Result<(), Status> {
+fn check_pin_hash(
+    auth: &mut Authenticator,
+    protocol: PinProtocol,
+    secret: &[u8],
+    pin_hash_enc: &[u8],
+) -> Result<(), Status> {
     let mut state = auth.store.pin()?.ok_or(Status::PIN_NOT_SET)?;
     if state.retries == 0 {
         return Err(Status::PIN_BLOCKED);
@@ -233,9 +242,8 @@ fn check_pin_hash(auth: &mut Authenticator, protocol: PinProtocol, secret: &[u8]
     state.retries -= 1;
     auth.store.set_pin(Some(state.clone()))?;
 
-    let matches = protocol
-        .decrypt(secret, pin_hash_enc)
-        .is_some_and(|h| h.len() == 16 && bool::from(h.ct_eq(&state.pin_hash)));
+    let matches =
+        protocol.decrypt(secret, pin_hash_enc).is_some_and(|h| h.len() == 16 && bool::from(h.ct_eq(&state.pin_hash)));
     if !matches {
         auth.pin.key_agreement = SecretKey::random(&mut OsRng);
         auth.pin.consecutive_failures += 1;

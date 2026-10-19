@@ -181,7 +181,11 @@ pub struct AuthenticatorConfig {
 
 impl Default for AuthenticatorConfig {
     fn default() -> Self {
-        AuthenticatorConfig { min_pin_length: DEFAULT_MIN_PIN_LENGTH, min_pin_length_rp_ids: Vec::new(), always_uv: false }
+        AuthenticatorConfig {
+            min_pin_length: DEFAULT_MIN_PIN_LENGTH,
+            min_pin_length_rp_ids: Vec::new(),
+            always_uv: false,
+        }
     }
 }
 
@@ -234,10 +238,7 @@ pub fn open(name: &str, opts: &StoreOptions) -> Result<Box<dyn CredentialStore>>
             log::info!("using credential store {}", path.display());
             Ok(Box::new(FileStore::open(&path, &passphrase)?))
         }
-        other => Err(Error::Config(format!(
-            "unknown store backend {other:?} (available: {})",
-            BACKENDS.join(", ")
-        ))),
+        other => Err(Error::Config(format!("unknown store backend {other:?} (available: {})", BACKENDS.join(", ")))),
     }
 }
 
