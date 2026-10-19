@@ -35,6 +35,8 @@ thiserror = "2"
 zeroize = "1"
 
 [dev-dependencies]
+# Real-device tests (tests/ctap_hid_fido2.rs); needs libudev headers to build.
+ctap-hid-fido2 = "3.6"
 tempfile = "3"
 
 # Key derivation and P-256 are painfully slow unoptimised; keep debug builds and tests usable.

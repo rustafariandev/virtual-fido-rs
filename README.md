@@ -214,4 +214,10 @@ cargo test       # drives the whole stack through a fake HID transport
 
 # Interop with python-fido2's independent CTAP2 / PIN implementation, no root needed:
 cargo build --example stdio_device && python3 scripts/interop_test.py
+
+# Through real kernel HID devices with the ctap-hid-fido2 client library. These
+# create /dev/uhid devices, so they need root; under plain `cargo test` they skip.
+scripts/run-root-tests.sh
 ```
+
+The real-device tests need the libudev headers to build (`dnf install systemd-devel`).
