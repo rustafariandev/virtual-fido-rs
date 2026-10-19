@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use ciborium::Value;
 
 use super::cbor::{self, as_array, as_bool, as_bytes, as_map, as_text, bytes, get, get_text, int, map, require, text};
-use super::{reject_pin_auth, CmdResult, Status, FLAG_UP};
+use super::client_pin::verify_pin_uv_auth;
+use super::{CmdResult, Status, FLAG_UP, FLAG_UV};
 use crate::authenticator::{Authenticator, RequestCtx};
 use crate::crypto;
 use crate::presence::{PresenceKind, PresenceRequest};
@@ -68,16 +69,14 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
             _ => None,
         },
     };
-    if let Some(pin_auth) = get(&m, 0x06) {
-        reject_pin_auth(auth, pin_auth, &presence, ctx)?;
-    }
+    let uv = verify_pin_uv_auth(auth, get(&m, 0x06), get(&m, 0x07), &client_data_hash, &presence, ctx)?;
     if creds.is_empty() {
         return Err(Status::NO_CREDENTIALS);
     }
     if up {
         auth.require_presence(&presence, ctx)?;
     }
-    let flags = if up { FLAG_UP } else { 0 };
+    let flags = if up { FLAG_UP } else { 0 } | if uv { FLAG_UV } else { 0 };
 
     let first = creds.remove(0);
     let total = creds.len() + 1;

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{AttestationMaterial, Credential, CredentialStore};
+use super::{AttestationMaterial, Credential, CredentialStore, PinState};
 use crate::error::{Error, Result};
 
 /// Complete store contents. Shared by the memory backend and the file backend,
@@ -9,6 +9,9 @@ use crate::error::{Error, Result};
 pub struct StoreState {
     pub credentials: Vec<Credential>,
     pub attestation: Option<AttestationMaterial>,
+    /// Absent in stores written before PIN support.
+    #[serde(default)]
+    pub pin: Option<PinState>,
 }
 
 impl StoreState {
@@ -34,6 +37,11 @@ impl StoreState {
             self.credentials.iter().rev().filter(|c| &c.rp_id_hash == rp_id_hash).cloned().collect();
         out.sort_by_key(|c| std::cmp::Reverse(c.created));
         out
+    }
+
+    pub fn reset(&mut self) {
+        self.credentials.clear();
+        self.pin = None;
     }
 
     pub fn increment_counter(&mut self, id: &[u8]) -> Result<u32> {
@@ -72,7 +80,7 @@ impl CredentialStore for MemoryStore {
     }
 
     fn reset(&mut self) -> Result<()> {
-        self.state.credentials.clear();
+        self.state.reset();
         Ok(())
     }
 
@@ -82,6 +90,15 @@ impl CredentialStore for MemoryStore {
 
     fn set_attestation(&mut self, attestation: AttestationMaterial) -> Result<()> {
         self.state.attestation = Some(attestation);
+        Ok(())
+    }
+
+    fn pin(&self) -> Result<Option<PinState>> {
+        Ok(self.state.pin.clone())
+    }
+
+    fn set_pin(&mut self, pin: Option<PinState>) -> Result<()> {
+        self.state.pin = pin;
         Ok(())
     }
 }

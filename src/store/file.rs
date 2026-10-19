@@ -14,7 +14,7 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use zeroize::Zeroizing;
 
-use super::{AttestationMaterial, Credential, CredentialStore, StoreState};
+use super::{AttestationMaterial, Credential, CredentialStore, PinState, StoreState};
 use crate::crypto::random_bytes;
 use crate::error::{Error, Result};
 
@@ -164,7 +164,7 @@ impl CredentialStore for FileStore {
 
     fn reset(&mut self) -> Result<()> {
         self.mutate(|s| {
-            s.credentials.clear();
+            s.reset();
             Ok(())
         })
     }
@@ -176,6 +176,17 @@ impl CredentialStore for FileStore {
     fn set_attestation(&mut self, attestation: AttestationMaterial) -> Result<()> {
         self.mutate(|s| {
             s.attestation = Some(attestation);
+            Ok(())
+        })
+    }
+
+    fn pin(&self) -> Result<Option<PinState>> {
+        Ok(self.state.pin.clone())
+    }
+
+    fn set_pin(&mut self, pin: Option<PinState>) -> Result<()> {
+        self.mutate(|s| {
+            s.pin = pin;
             Ok(())
         })
     }

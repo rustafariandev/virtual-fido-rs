@@ -48,12 +48,20 @@ pub struct Authenticator {
     pub(crate) presence: Arc<dyn PresenceProvider>,
     pub(crate) aaguid: [u8; 16],
     pub(crate) pending_assertions: Option<ctap2::Pending>,
+    pub(crate) pin: ctap2::PinRuntime,
     pub(crate) u2f_presence: Option<u2f::PendingPresence>,
 }
 
 impl Authenticator {
     pub fn new(store: Box<dyn CredentialStore>, presence: Arc<dyn PresenceProvider>, aaguid: [u8; 16]) -> Self {
-        Authenticator { store, presence, aaguid, pending_assertions: None, u2f_presence: None }
+        Authenticator {
+            store,
+            presence,
+            aaguid,
+            pending_assertions: None,
+            pin: ctap2::PinRuntime::new(),
+            u2f_presence: None,
+        }
     }
 
     /// Handles a CTAPHID_CBOR request; returns status byte + CBOR response.

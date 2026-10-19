@@ -11,21 +11,25 @@ default = ["notify"]
 notify = ["dep:notify-rust"]
 
 [dependencies]
+aes = "0.8"
 aes-gcm = "0.10"
 anyhow = "1"
 argon2 = "0.5"
 ciborium = "0.2"
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
+hkdf = "0.12"
+hmac = "0.12"
 log = "0.4"
 notify-rust = { version = "4", optional = true }
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+p256 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
 rand = "0.8"
 rcgen = "0.13"
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 sha2 = "0.10"
+subtle = "2"
 thiserror = "2"
 zeroize = "1"
 

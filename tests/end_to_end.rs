@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use virtual_fido::authenticator::DEFAULT_AAGUID;
 use virtual_fido::ctap2::cbor::{bytes, get, get_text, int, map, text};
+use virtual_fido::ctap2::pin_protocol::{parse_cose_key, PinProtocol};
 use virtual_fido::ctaphid::{self, ReportSink, Server, BROADCAST_CID, REPORT_SIZE};
 use virtual_fido::presence::{AutoPresence, CancelToken, Presence, PresenceProvider, PresenceRequest};
 use virtual_fido::store::{FileStore, KdfParams, MemoryStore};
@@ -160,13 +161,14 @@ fn get_assertion_params(rp: &str, cdh: &[u8; 32], allow: &[&[u8]]) -> Value {
 struct NewCredential {
     id: Vec<u8>,
     key: VerifyingKey,
+    flags: u8,
 }
 
 fn parse_make_credential(rp: &str, resp: &[(Value, Value)]) -> NewCredential {
     assert_eq!(get(resp, 1).unwrap().as_text(), Some("packed"));
     let ad = get(resp, 2).unwrap().as_bytes().unwrap();
     assert_eq!(&ad[..32], &sha256(rp.as_bytes()));
-    assert_eq!(ad[32], 0x41, "UP | AT");
+    assert_eq!(ad[32] & 0x41, 0x41, "UP | AT");
     assert_eq!(&ad[37..53], &DEFAULT_AAGUID);
     let id_len = u16::from_be_bytes([ad[53], ad[54]]) as usize;
     let id = ad[55..55 + id_len].to_vec();
@@ -180,7 +182,7 @@ fn parse_make_credential(rp: &str, resp: &[(Value, Value)]) -> NewCredential {
     let att = get(resp, 3).unwrap().as_map().unwrap();
     let sig = Signature::from_der(get_text(att, "sig").unwrap().as_bytes().unwrap()).unwrap();
     key.verify(&[ad, &[0x11u8; 32][..]].concat(), &sig).unwrap();
-    NewCredential { id, key }
+    NewCredential { id, key, flags: ad[32] }
 }
 
 fn verify_assertion(cred_key: &VerifyingKey, resp: &[(Value, Value)], cdh: &[u8; 32]) -> u32 {
@@ -408,4 +410,170 @@ fn file_store_persists_and_checks_passphrase() {
 
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+// ---- client PIN -------------------------------------------------------------------
+
+impl Client {
+    /// clientPIN request; `entries` excludes the protocol and subcommand.
+    fn client_pin(&mut self, protocol: PinProtocol, sub: i64, mut entries: Vec<(Value, Value)>) -> (u8, Vec<(Value, Value)>) {
+        entries.push((int(1), int(protocol.id())));
+        entries.push((int(2), int(sub)));
+        self.ctap2(0x06, Some(map(entries)))
+    }
+
+    /// Runs key agreement; returns our COSE key and the shared secret.
+    fn key_agreement(&mut self, protocol: PinProtocol) -> (Value, Vec<u8>) {
+        let (status, resp) = self.client_pin(protocol, 2, vec![]);
+        assert_eq!(status, 0);
+        let peer = parse_cose_key(get(&resp, 1).unwrap()).unwrap();
+        let (cose, secret) = protocol.encapsulate(&peer);
+        (cose, secret.to_vec())
+    }
+
+    fn set_pin(&mut self, protocol: PinProtocol, pin: &str) -> u8 {
+        let (cose, secret) = self.key_agreement(protocol);
+        let new_pin_enc = protocol.encrypt(&secret, &pad_pin(pin));
+        let pin_auth = protocol.authenticate_with_secret(&secret, &new_pin_enc);
+        self.client_pin(protocol, 3, vec![(int(3), cose), (int(4), bytes(&pin_auth)), (int(5), bytes(&new_pin_enc))]).0
+    }
+
+    fn change_pin(&mut self, protocol: PinProtocol, old: &str, new: &str) -> u8 {
+        let (cose, secret) = self.key_agreement(protocol);
+        let pin_hash_enc = protocol.encrypt(&secret, &sha256(old.as_bytes())[..16]);
+        let new_pin_enc = protocol.encrypt(&secret, &pad_pin(new));
+        let pin_auth = protocol.authenticate_with_secret(&secret, &[&new_pin_enc[..], &pin_hash_enc].concat());
+        let entries = vec![(int(3), cose), (int(4), bytes(&pin_auth)), (int(5), bytes(&new_pin_enc)), (int(6), bytes(&pin_hash_enc))];
+        self.client_pin(protocol, 4, entries).0
+    }
+
+    fn pin_token(&mut self, protocol: PinProtocol, pin: &str) -> Result<Vec<u8>, u8> {
+        let (cose, secret) = self.key_agreement(protocol);
+        let pin_hash_enc = protocol.encrypt(&secret, &sha256(pin.as_bytes())[..16]);
+        let (status, resp) = self.client_pin(protocol, 5, vec![(int(3), cose), (int(6), bytes(&pin_hash_enc))]);
+        if status != 0 {
+            return Err(status);
+        }
+        let enc = get(&resp, 2).unwrap().as_bytes().unwrap();
+        Ok(protocol.decrypt(&secret, enc).unwrap().to_vec())
+    }
+
+    fn pin_retries(&mut self) -> i128 {
+        let (status, resp) = self.client_pin(PinProtocol::V1, 1, vec![]);
+        assert_eq!(status, 0);
+        get(&resp, 3).unwrap().as_integer().unwrap().into()
+    }
+
+    fn client_pin_option(&mut self) -> bool {
+        let (_, info) = self.ctap2(0x04, None);
+        get_text(get(&info, 4).unwrap().as_map().unwrap(), "clientPin").unwrap().as_bool().unwrap()
+    }
+}
+
+fn pad_pin(pin: &str) -> Vec<u8> {
+    let mut p = pin.as_bytes().to_vec();
+    p.resize(64, 0);
+    p
+}
+
+fn with_pin_auth(params: Value, key: (i64, i64), protocol: PinProtocol, token: &[u8], cdh: &[u8]) -> Value {
+    let Value::Map(mut entries) = params else { unreachable!() };
+    entries.push((int(key.0), bytes(&protocol.authenticate(token, cdh))));
+    entries.push((int(key.1), int(protocol.id())));
+    map(entries)
+}
+
+#[test]
+fn pin_set_use_and_change() {
+    for protocol in PinProtocol::SUPPORTED {
+        let mut c = Client::new(Arc::new(AutoPresence));
+        assert!(!c.client_pin_option());
+        let (_, info) = c.ctap2(0x04, None);
+        let protocols: Vec<i128> = get(&info, 6).unwrap().as_array().unwrap().iter().map(|v| v.as_integer().unwrap().into()).collect();
+        assert_eq!(protocols, [2, 1]);
+        assert_eq!(c.pin_token(protocol, "1234"), Err(0x35), "no PIN yet");
+
+        assert_eq!(c.set_pin(protocol, "123"), 0x37, "too short");
+        assert_eq!(c.set_pin(protocol, "1234"), 0);
+        assert!(c.client_pin_option());
+        assert_eq!(c.set_pin(protocol, "5678"), 0x30, "already set");
+
+        // makeCredential now requires the PIN.
+        let params = make_credential_params("example.com", b"alice", "alice", true, &[]);
+        assert_eq!(c.ctap2(0x01, Some(params.clone())).0, 0x36);
+        let token = c.pin_token(protocol, "1234").unwrap();
+        assert_eq!(token.len(), 32);
+        let (status, resp) = c.ctap2(0x01, Some(with_pin_auth(params.clone(), (8, 9), protocol, &token, &[0x11; 32])));
+        assert_eq!(status, 0);
+        let cred = parse_make_credential("example.com", &resp);
+        assert_eq!(cred.flags, 0x45, "UP | UV | AT");
+        let (status, _) = c.ctap2(0x01, Some(with_pin_auth(params, (8, 9), protocol, &token, &[0x99; 32])));
+        assert_eq!(status, 0x33, "pinUvAuthParam over the wrong hash");
+
+        // getAssertion works with or without the PIN; UV reflects which.
+        let cdh = [0x55; 32];
+        let (status, resp) = c.ctap2(0x02, Some(get_assertion_params("example.com", &cdh, &[])));
+        assert_eq!(status, 0);
+        assert_eq!(get(&resp, 2).unwrap().as_bytes().unwrap()[32], 0x01);
+        let (status, resp) = c.ctap2(0x02, Some(with_pin_auth(get_assertion_params("example.com", &cdh, &[]), (6, 7), protocol, &token, &cdh)));
+        assert_eq!(status, 0);
+        assert_eq!(get(&resp, 2).unwrap().as_bytes().unwrap()[32], 0x05);
+        verify_assertion(&cred.key, &resp, &cdh);
+
+        assert_eq!(c.change_pin(protocol, "0000", "abcd"), 0x31, "wrong old PIN");
+        assert_eq!(c.pin_retries(), 7);
+        assert_eq!(c.change_pin(protocol, "1234", "abcd"), 0);
+        assert_eq!(c.pin_retries(), 8);
+        assert_eq!(c.pin_token(protocol, "1234"), Err(0x31));
+        let new_token = c.pin_token(protocol, "abcd").unwrap();
+        // Changing the PIN and issuing a new token invalidate the old one.
+        let params = get_assertion_params("example.com", &cdh, &[]);
+        assert_eq!(c.ctap2(0x02, Some(with_pin_auth(params.clone(), (6, 7), protocol, &token, &cdh))).0, 0x33);
+        assert_eq!(c.ctap2(0x02, Some(with_pin_auth(params, (6, 7), protocol, &new_token, &cdh))).0, 0);
+    }
+}
+
+#[test]
+fn pin_retry_limits() {
+    let p = PinProtocol::V2;
+    let mut c = Client::new(Arc::new(AutoPresence));
+    assert_eq!(c.set_pin(p, "1234"), 0);
+    assert_eq!(c.pin_token(p, "0000"), Err(0x31));
+    assert_eq!(c.pin_token(p, "0000"), Err(0x31));
+    assert_eq!(c.pin_token(p, "0000"), Err(0x34), "third consecutive failure needs a power cycle");
+    assert_eq!(c.pin_token(p, "1234"), Err(0x34), "even the right PIN");
+    assert_eq!(c.pin_retries(), 5);
+}
+
+#[test]
+fn pin_blocks_after_eight_failures_and_reset_clears_it() {
+    let p = PinProtocol::V1;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.bin");
+    let params = KdfParams { m_cost: 64, t_cost: 1, p_cost: 1 };
+    let new_client = || {
+        let store = FileStore::open_with_params(&path, "pw", params).unwrap();
+        Client::with_auth(Authenticator::new(Box::new(store), Arc::new(AutoPresence), DEFAULT_AAGUID))
+    };
+
+    let mut c = new_client();
+    assert_eq!(c.set_pin(p, "1234"), 0);
+    drop(c);
+    let mut statuses = Vec::new();
+    // Each "power cycle" (fresh authenticator on the same store) allows 3 more guesses.
+    for _ in 0..3 {
+        let mut c = new_client();
+        for _ in 0..3 {
+            statuses.push(c.pin_token(p, "0000").unwrap_err());
+        }
+    }
+    assert_eq!(statuses, [0x31, 0x31, 0x34, 0x31, 0x31, 0x34, 0x31, 0x32, 0x32]);
+
+    let mut c = new_client();
+    assert_eq!(c.pin_retries(), 0, "retries persist across restarts");
+    assert_eq!(c.pin_token(p, "1234"), Err(0x32), "blocked");
+    assert_eq!(c.ctap2(0x07, None).0, 0);
+    assert!(!c.client_pin_option(), "reset removes the PIN");
+    assert_eq!(c.set_pin(p, "4321"), 0);
+    assert!(c.pin_token(p, "4321").is_ok());
 }

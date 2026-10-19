@@ -5,10 +5,11 @@ through `/dev/uhid`, so browsers (WebAuthn), libfido2, `ssh-keygen -t ecdsa-sk` 
 anything else that talks to hardware keys will see it as a plugged-in key.
 
 Supported: CTAPHID transport (keepalive, cancel, multiple channels), CTAP2 `getInfo`,
-`makeCredential`, `getAssertion`, `getNextAssertion`, `reset`, resident (discoverable)
-keys, ES256 with packed self-attestation, and the CTAP1/U2F `REGISTER` /
-`AUTHENTICATE` / `VERSION` commands. Not supported yet: PIN / user verification,
-extensions (`hmac-secret`, `credProtect`, …), credential management.
+`makeCredential`, `getAssertion`, `getNextAssertion`, `reset`, `clientPIN`
+(PIN/UV auth protocols 1 and 2), resident (discoverable) keys, ES256 with packed
+self-attestation, and the CTAP1/U2F `REGISTER` / `AUTHENTICATE` / `VERSION` commands.
+Not supported yet: extensions (`hmac-secret`, `credProtect`, …), credential
+management, CTAP 2.1 permission-scoped PIN tokens.
 
 > **Security note.** This is a *software* key: private keys live in a file (or in
 > memory) on this machine, not in tamper-resistant hardware. Anyone who gets the
@@ -56,6 +57,21 @@ The file store is AES-256-GCM encrypted with a key derived by Argon2id (64 MiB, 
 from your passphrase, and is rewritten atomically (mode 0600) on every change,
 including signature-counter updates.
 
+## PIN
+
+Set, change and use a PIN with any FIDO2 client, for example `fido2-token -S /dev/hidrawN`
+(set), `fido2-token -C /dev/hidrawN` (change), or your browser's security-key settings.
+Once a PIN is set:
+
+- creating a credential requires it (the key answers `PIN_REQUIRED` until the client
+  sends a PIN-derived token), and the credential is marked user-verified;
+- signing in works with or without it; with it, the assertion is marked user-verified;
+- 8 wrong guesses in total block the PIN until the key is reset (which deletes all
+  credentials); after 3 wrong guesses in a row, restart virtual-fido to try again.
+
+Only a truncated SHA-256 of the PIN is stored, along with the retry counter, in the
+credential store. With `--store memory` the PIN disappears on exit like everything else.
+
 ## Try it
 
 ```sh
@@ -71,8 +87,9 @@ or register and sign in at <https://webauthn.io>.
 Storage and user presence are traits, picked by name at startup.
 
 - **Storage**: implement `store::CredentialStore` (`put`, `get`, `list_by_rp`,
-  `increment_counter`, `reset`, `attestation`, `set_attestation`) and add a match arm in
-  `store::open`. `MemoryStore` (`src/store/memory.rs`) is the simplest example.
+  `increment_counter`, `reset`, `attestation`, `set_attestation`, `pin`, `set_pin`) and
+  add a match arm in `store::open`. `set_pin` must be durable before it returns, since
+  the PIN retry counter relies on it. `MemoryStore` (`src/store/memory.rs`) is the simplest example.
 - **Presence**: implement `presence::PresenceProvider::request`, which blocks until the
   user answers and should poll the `CancelToken` every ~100 ms; add a match arm in
   `presence::from_name`. See `src/presence/terminal.rs`.
@@ -87,7 +104,7 @@ Both are also usable directly from the library: build an `Authenticator` with an
 src/uhid.rs           /dev/uhid device and report I/O
 src/ctaphid.rs        CTAPHID framing, channels, keepalive/cancel, worker threads
 src/authenticator.rs  shared state; routes CBOR to ctap2/, APDUs to u2f.rs
-src/ctap2/            CTAP2 commands
+src/ctap2/            CTAP2 commands, clientPIN and PIN/UV auth protocols
 src/u2f.rs            CTAP1 / U2F
 src/store/            CredentialStore trait + memory and encrypted-file backends
 src/presence/         PresenceProvider trait + auto, terminal, notify backends
@@ -97,4 +114,7 @@ src/presence/         PresenceProvider trait + auto, terminal, notify backends
 
 ```sh
 cargo test       # drives the whole stack through a fake HID transport
+
+# Interop with python-fido2's independent CTAP2 / PIN implementation, no root needed:
+cargo build --example stdio_device && python3 scripts/interop_test.py
 ```

@@ -1,5 +1,6 @@
 use super::cbor::{self, as_array, as_bool, as_bytes, as_int, as_map, as_text, bytes, get, get_text, int, map, require, text};
-use super::{reject_pin_auth, CmdResult, Status, FLAG_AT, FLAG_UP};
+use super::client_pin::verify_pin_uv_auth;
+use super::{CmdResult, Status, FLAG_AT, FLAG_UP, FLAG_UV};
 use crate::authenticator::{now_millis, Authenticator, RequestCtx};
 use crate::crypto::{self, COSE_ALG_ES256};
 use crate::presence::{PresenceKind, PresenceRequest};
@@ -52,8 +53,9 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         rp_id: Some(rp_id.clone()),
         user: user_display_name.clone().or_else(|| user_name.clone()),
     };
-    if let Some(pin_auth) = get(&m, 0x08) {
-        reject_pin_auth(auth, pin_auth, &presence, ctx)?;
+    let uv = verify_pin_uv_auth(auth, get(&m, 0x08), get(&m, 0x09), client_data_hash, &presence, ctx)?;
+    if !uv && auth.store.pin()?.is_some() {
+        return Err(Status::PIN_REQUIRED);
     }
 
     let rp_id_hash = crypto::sha256(rp_id.as_bytes());
@@ -76,7 +78,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
 
     let mut auth_data = Vec::with_capacity(37 + 18 + id.len() + cose_key.len());
     auth_data.extend_from_slice(&rp_id_hash);
-    auth_data.push(FLAG_UP | FLAG_AT);
+    auth_data.push(FLAG_UP | FLAG_AT | if uv { FLAG_UV } else { 0 });
     auth_data.extend_from_slice(&0u32.to_be_bytes());
     auth_data.extend_from_slice(&auth.aaguid);
     auth_data.extend_from_slice(&(id.len() as u16).to_be_bytes());

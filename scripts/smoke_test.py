@@ -27,7 +27,7 @@ user = {"id": os.urandom(8), "name": "alice", "displayName": "Alice"}
 cdh = hashlib.sha256(b"register").digest()
 att = ctap.make_credential(cdh, rp, user, [{"type": "public-key", "alg": -7}], options={"rk": True})
 cred = att.auth_data.credential_data
-Attestation.for_type(att.fmt)().verify(att.att_stmt, att.auth_data, cdh)
+Attestation.for_type(att.fmt)().verify(att.att_statement, att.auth_data, cdh)
 print("registered credential", cred.credential_id.hex(), "- attestation verified")
 
 cdh = hashlib.sha256(b"login").digest()

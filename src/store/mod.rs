@@ -72,6 +72,15 @@ impl Drop for AttestationMaterial {
     }
 }
 
+/// Persistent client-PIN state. Only a hash of the PIN is kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinState {
+    /// LEFT(SHA-256(PIN), 16), as CTAP specifies.
+    pub pin_hash: [u8; 16],
+    /// Wrong guesses left before the PIN is blocked until reset.
+    pub retries: u8,
+}
+
 pub trait CredentialStore: Send {
     /// Stores a credential. A discoverable credential replaces any existing discoverable
     /// credential for the same RP and user ID.
@@ -81,10 +90,14 @@ pub trait CredentialStore: Send {
     fn list_by_rp(&self, rp_id_hash: &[u8; 32]) -> Result<Vec<Credential>>;
     /// Increments and returns the credential's signature counter.
     fn increment_counter(&mut self, id: &[u8]) -> Result<u32>;
-    /// Deletes all credentials. Attestation material is kept.
+    /// Deletes all credentials and the PIN. Attestation material is kept.
     fn reset(&mut self) -> Result<()>;
     fn attestation(&self) -> Result<Option<AttestationMaterial>>;
     fn set_attestation(&mut self, attestation: AttestationMaterial) -> Result<()>;
+    /// The client PIN, if one is set.
+    fn pin(&self) -> Result<Option<PinState>>;
+    /// Must be durable before returning: retry counters depend on it.
+    fn set_pin(&mut self, pin: Option<PinState>) -> Result<()>;
 }
 
 #[derive(Debug, Default, Clone)]
