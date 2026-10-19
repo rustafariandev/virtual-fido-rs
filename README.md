@@ -221,3 +221,7 @@ scripts/run-root-tests.sh
 ```
 
 The real-device tests need the libudev headers to build (`dnf install systemd-devel`).
+
+CI (`.github/workflows/ci.yml`, GitHub Actions) runs all of these on every push and
+pull request: rustfmt and clippy, `cargo test`, the python-fido2 interop script, and
+the real-device tests as root on the runner.

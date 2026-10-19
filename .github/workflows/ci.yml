@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # hidapi (via the ctap-hid-fido2 dev-dependency) links libudev.
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      # Unit and in-process end-to-end tests. The real-device tests skip here (not
+      # root); the real-device job runs them.
+      - run: cargo test
+
+  interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # scripts/interop_test.py targets the python-fido2 0.9 API.
+      - run: pip install "fido2==0.9.3"
+      - run: cargo build --example stdio_device
+      - run: python3 scripts/interop_test.py
+
+  real-device:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - name: Load the uhid kernel module
+        run: |
+          sudo modprobe uhid || true
+          if [ ! -e /dev/uhid ]; then
+            echo "::error::/dev/uhid is not available on this runner kernel ($(uname -r))"
+            exit 1
+          fi
+          ls -l /dev/uhid
+      # Builds the test binary as the runner user, then runs it with sudo.
+      - run: scripts/run-root-tests.sh
