@@ -6,7 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-bin=$(cargo test --test ctap_hid_fido2 --no-run 2>&1 |
+bin=$(cargo test --color never --test ctap_hid_fido2 --no-run 2>&1 |
     sed -n 's/.*Executable tests\/ctap_hid_fido2\.rs (\(.*\))/\1/p')
 if [[ -z "$bin" ]]; then
     echo "could not find the ctap_hid_fido2 test binary; build output:" >&2
