@@ -116,6 +116,7 @@ fn register(auth: &mut Authenticator, data: &[u8]) -> Result<Vec<u8>, u16> {
             hmac_secret: None,
             cred_protect: CredProtect::UvOptional,
             large_blob_key: None,
+            cred_blob: None,
         })
         .map_err(internal)?;
     log::info!("registered U2F credential");

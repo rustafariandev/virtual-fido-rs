@@ -6,11 +6,11 @@ anything else that talks to hardware keys will see it as a plugged-in key.
 
 Supported: CTAPHID transport (keepalive, cancel, multiple channels), CTAP2 `getInfo`,
 `makeCredential`, `getAssertion`, `getNextAssertion`, `reset`, `credentialManagement`, `largeBlobs`, `clientPIN`
-(PIN/UV auth protocols 1 and 2), the `hmac-secret`, `credProtect` and `largeBlobKey`
-extensions,
+(PIN/UV auth protocols 1 and 2), the `hmac-secret`, `credProtect`, `largeBlobKey` and
+`credBlob` extensions,
 resident (discoverable) keys, ES256 with packed self-attestation, and the CTAP1/U2F
 `REGISTER` / `AUTHENTICATE` / `VERSION` commands. Not supported yet: other extensions
-(`credBlob`, `minPinLength`, …), CTAP 2.1 permission-scoped PIN tokens.
+(`minPinLength`, …), CTAP 2.1 permission-scoped PIN tokens.
 
 > **Security note.** This is a *software* key: private keys live in a file (or in
 > memory) on this machine, not in tamper-resistant hardware. Anyone who gets the
@@ -129,6 +129,14 @@ extension. Each resident credential created with the `largeBlobKey` extension ge
 32-byte key, returned at creation and on sign-in; clients encrypt their own entries
 with it, and the key never looks inside them. Anyone can read the array; once a PIN
 is set, writing it needs the PIN. Reset empties it.
+
+## credBlob
+
+A site can store up to 32 bytes with a credential when creating it, and gets them
+back in the sign-in response when it asks. Longer blobs aren't stored (the creation
+response says so) but the credential is still created. Unlike large-blob entries,
+they come back in plain text in the signed sign-in data, so treat them as
+configuration, not secrets.
 
 ## Try it
 

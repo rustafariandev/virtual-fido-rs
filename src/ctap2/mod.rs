@@ -2,6 +2,7 @@
 
 pub mod cbor;
 mod client_pin;
+mod cred_blob;
 mod cred_mgmt;
 mod cred_protect;
 mod get_assertion;

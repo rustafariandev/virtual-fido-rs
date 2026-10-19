@@ -1,6 +1,6 @@
 use super::cbor::{self, as_array, as_bool, as_bytes, as_int, as_map, as_text, bytes, get, get_text, int, map, require, text};
 use super::client_pin::verify_pin_uv_auth;
-use super::{cred_mgmt, cred_protect, hmac_secret, large_blobs};
+use super::{cred_blob, cred_mgmt, cred_protect, hmac_secret, large_blobs};
 use super::{CmdResult, Status, FLAG_AT, FLAG_ED, FLAG_UP, FLAG_UV};
 use crate::authenticator::{now_millis, Authenticator, RequestCtx};
 use crate::crypto::{self, COSE_ALG_ES256};
@@ -52,6 +52,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
 
     let hmac_secret = hmac_secret::requested_at_creation(get(&m, 0x06))?;
     let cred_protect = cred_protect::requested(get(&m, 0x06))?;
+    let cred_blob_requested = cred_blob::requested_at_creation(get(&m, 0x06))?;
     let large_blob_key = large_blobs::requested(get(&m, 0x06))?.then(large_blobs::new_key);
     if large_blob_key.is_some() && !rk {
         // Only resident credentials can have large blobs.
@@ -106,6 +107,11 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
     if hmac_secret {
         extensions.push(hmac_secret::creation_output());
     }
+    // Over-long blobs are not an error: the output just reports they weren't stored.
+    let cred_blob = cred_blob_requested.as_ref().filter(|b| b.len() <= cred_blob::MAX_LEN).cloned();
+    if cred_blob_requested.is_some() {
+        extensions.push(cred_blob::creation_output(cred_blob.is_some()));
+    }
 
     let mut auth_data = Vec::with_capacity(37 + 18 + id.len() + cose_key.len());
     auth_data.extend_from_slice(&rp_id_hash);
@@ -143,6 +149,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         hmac_secret: hmac_secret.then(hmac_secret::new_cred_random),
         cred_protect: cred_protect.unwrap_or(CredProtect::UvOptional),
         large_blob_key: large_blob_key.clone(),
+        cred_blob,
     })?;
 
     let mut response = vec![

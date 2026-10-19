@@ -17,7 +17,12 @@ from fido2.ctap import CtapError
 from fido2.ctap2 import ClientPin, Ctap2
 from fido2.ctap2.blob import LargeBlobs
 from fido2.ctap2.credman import CredentialManagement
-from fido2.ctap2.extensions import CredProtectExtension, HmacSecretExtension, LargeBlobKeyExtension
+from fido2.ctap2.extensions import (
+    CredBlobExtension,
+    CredProtectExtension,
+    HmacSecretExtension,
+    LargeBlobKeyExtension,
+)
 from fido2.ctap2.pin import PinProtocolV1, PinProtocolV2
 from fido2.hid import CtapHidDevice
 from fido2.hid.base import CtapHidConnection, HidDescriptor
@@ -205,6 +210,22 @@ assert blobs.get_blob(assertion.large_blob_key) == b"certificate or other per-cr
 blobs.delete_blob(key)
 assert blobs.get_blob(key) is None
 print("largeBlob: key via makeCredential/getAssertion, put / get / delete blob OK")
+
+# credBlob: a few bytes stored at creation, returned in authData on sign-in.
+ctap.reset()
+assert ctap.get_info().max_cred_blob_length == 32
+blob = b"ssh-config:v1;" + os.urandom(8)
+ext = CredBlobExtension(ctap).process_create_input({"credBlob": blob})
+assert ext == blob
+att = ctap.make_credential(
+    os.urandom(32), rp, {"id": b"erin", "name": "erin"}, key_params, extensions={"credBlob": ext}, options={"rk": True}
+)
+assert att.auth_data.extensions == {"credBlob": True}, att.auth_data.extensions
+assert CredBlobExtension(ctap).process_create_input({"credBlob": b"x" * 33}) is None, "client checks the limit"
+get_ext = CredBlobExtension(ctap).process_get_input({"getCredBlob": True})
+assertion = ctap.get_assertion(rp["id"], os.urandom(32), extensions={"credBlob": get_ext})
+assert assertion.auth_data.extensions == {"credBlob": blob}, assertion.auth_data.extensions
+print("credBlob: store at creation / return on sign-in OK")
 
 dev.close()
 print("OK")

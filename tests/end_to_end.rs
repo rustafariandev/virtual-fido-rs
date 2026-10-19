@@ -661,7 +661,10 @@ fn hmac_secret_outputs() {
     for protocol in PinProtocol::SUPPORTED {
         let mut c = Client::new(Arc::new(AutoPresence));
         let (_, info) = c.ctap2(0x04, None);
-        assert_eq!(get(&info, 2), Some(&Value::Array(vec![text("credProtect"), text("hmac-secret"), text("largeBlobKey")])));
+        assert_eq!(
+            get(&info, 2),
+            Some(&Value::Array(vec![text("credBlob"), text("credProtect"), text("hmac-secret"), text("largeBlobKey")]))
+        );
         hmac_secret_credential(&mut c, b"u1", None);
 
         let salt1 = [1u8; 32];
@@ -1073,4 +1076,49 @@ fn large_blob_keys() {
     let (status, listed) = c.cred_mgmt(0x0A, 4, Some(rp_hash), Some((p, &token)));
     assert_eq!(status, 0);
     assert_eq!(get(&listed, 0x0B).unwrap().as_bytes().unwrap(), &key);
+}
+
+// ---- credBlob ---------------------------------------------------------------------
+
+#[test]
+fn cred_blob() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let (_, info) = c.ctap2(0x04, None);
+    assert_eq!(get(&info, 0x0F), Some(&int(32)), "maxCredBlobLength");
+    let create = |c: &mut Client, user: &[u8], rk: bool, ext: Value| {
+        let (status, resp) = c.ctap2(0x01, Some(with_extensions(make_credential_params("example.com", user, "u", rk, &[]), 6, ext)));
+        assert_eq!(status, 0);
+        let ext = auth_data_extensions(get(&resp, 2).unwrap().as_bytes().unwrap()).1;
+        (parse_make_credential("example.com", &resp), ext)
+    };
+
+    // Stored when it fits, for resident and non-resident credentials alike.
+    let (resident, ext) = create(&mut c, b"r", true, map(vec![(text("credBlob"), bytes(b"resident blob"))]));
+    assert_eq!(ext, Some(map(vec![(text("credBlob"), Value::Bool(true))])));
+    let (plain, ext) = create(&mut c, b"p", false, map(vec![(text("credBlob"), bytes(&[9; 32]))]));
+    assert_eq!(ext, Some(map(vec![(text("credBlob"), Value::Bool(true))])));
+    // Too long: reported as not stored, but the credential is still created.
+    let (too_long, ext) = create(&mut c, b"t", false, map(vec![(text("credBlob"), bytes(&[0; 33]))]));
+    assert_eq!(ext, Some(map(vec![(text("credBlob"), Value::Bool(false))])));
+    // Combined with hmac-secret, both outputs share one map.
+    let (_, ext) = create(&mut c, b"h", false, map(vec![(text("hmac-secret"), Value::Bool(true)), (text("credBlob"), bytes(b"x"))]));
+    assert_eq!(ext, Some(map(vec![(text("credBlob"), Value::Bool(true)), (text("hmac-secret"), Value::Bool(true))])));
+
+    let cdh = [0; 32];
+    let get_blob = |c: &mut Client, id: &[u8], ask: bool| {
+        let mut params = get_assertion_params("example.com", &cdh, &[id]);
+        if ask {
+            params = with_extensions(params, 4, map(vec![(text("credBlob"), Value::Bool(true))]));
+        }
+        let (status, resp) = c.ctap2(0x02, Some(params));
+        assert_eq!(status, 0);
+        auth_data_extensions(get(&resp, 2).unwrap().as_bytes().unwrap())
+    };
+    assert_eq!(get_blob(&mut c, &resident.id, true), (0x81, Some(map(vec![(text("credBlob"), bytes(b"resident blob"))]))));
+    assert_eq!(get_blob(&mut c, &plain.id, true).1, Some(map(vec![(text("credBlob"), bytes(&[9; 32]))])));
+    assert_eq!(get_blob(&mut c, &too_long.id, true).1, Some(map(vec![(text("credBlob"), bytes(b""))])), "empty when none stored");
+    assert_eq!(get_blob(&mut c, &resident.id, false), (0x01, None), "only when asked");
+
+    let bad = with_extensions(make_credential_params("example.com", b"b", "u", true, &[]), 6, map(vec![(text("credBlob"), Value::Bool(true))]));
+    assert_eq!(c.ctap2(0x01, Some(bad)).0, 0x11, "credBlob must be bytes");
 }

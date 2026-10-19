@@ -9,7 +9,7 @@
 use ciborium::Value;
 use zeroize::Zeroizing;
 
-use super::cbor::{as_bool, as_bytes, as_int, as_map, bytes, get, get_text, map, require, text};
+use super::cbor::{as_bool, as_bytes, as_int, as_map, bytes, get, get_text, require, text};
 use super::pin_protocol::PinProtocol;
 use super::Status;
 use crate::authenticator::Authenticator;
@@ -70,9 +70,9 @@ pub(super) fn parse_request(auth: &Authenticator, extensions: Option<&Value>) ->
 }
 
 impl Request {
-    /// getAssertion's extension output for `cred`, `{"hmac-secret": enc(output1 [|| output2])}`.
+    /// getAssertion's extension output entry for `cred`, `"hmac-secret": enc(output1 [|| output2])`.
     /// `None` if the credential was created without hmac-secret.
-    pub(super) fn output(&self, cred: &Credential, user_verified: bool) -> Option<Value> {
+    pub(super) fn output(&self, cred: &Credential, user_verified: bool) -> Option<(Value, Value)> {
         let cred_random = cred.hmac_secret.as_deref()?;
         let key = if user_verified { &cred_random[..32] } else { &cred_random[32..] };
         let mut outputs = Zeroizing::new(Vec::with_capacity(self.salts.len()));
@@ -81,6 +81,6 @@ impl Request {
             outputs.extend(PinProtocol::V2.authenticate(key, salt));
         }
         let encrypted = self.protocol.encrypt(&self.shared_secret, &outputs);
-        Some(map(vec![(text(NAME), bytes(&encrypted))]))
+        Some((text(NAME), bytes(&encrypted)))
     }
 }

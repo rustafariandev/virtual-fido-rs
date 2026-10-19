@@ -4,7 +4,7 @@ use ciborium::Value;
 
 use super::cbor::{self, as_array, as_bool, as_bytes, as_map, as_text, bytes, get, get_text, int, map, require, text};
 use super::client_pin::verify_pin_uv_auth;
-use super::{hmac_secret, large_blobs};
+use super::{cred_blob, hmac_secret, large_blobs};
 use super::{CmdResult, Status, FLAG_ED, FLAG_UP, FLAG_UV};
 use crate::authenticator::{Authenticator, RequestCtx};
 use crate::crypto;
@@ -29,6 +29,7 @@ pub(crate) struct Pending {
 struct Extensions {
     hmac_secret: Option<hmac_secret::Request>,
     large_blob_key: bool,
+    cred_blob: bool,
 }
 
 pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) -> CmdResult {
@@ -57,6 +58,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
     let extensions = Extensions {
         hmac_secret: hmac_secret::parse_request(auth, get(&m, 0x04))?,
         large_blob_key: large_blobs::requested(get(&m, 0x04))?,
+        cred_blob: cred_blob::requested(get(&m, 0x04))?,
     };
 
     let rp_id_hash = crypto::sha256(rp_id.as_bytes());
@@ -141,14 +143,20 @@ fn assertion(
     requested: &Extensions,
     number_of_credentials: Option<usize>,
 ) -> Result<Value, Status> {
-    let extensions = requested.hmac_secret.as_ref().and_then(|h| h.output(cred, flags & FLAG_UV != 0));
+    let mut extensions = Vec::new();
+    if requested.cred_blob {
+        extensions.push(cred_blob::assertion_output(cred));
+    }
+    if let Some(output) = requested.hmac_secret.as_ref().and_then(|h| h.output(cred, flags & FLAG_UV != 0)) {
+        extensions.push(output);
+    }
     let counter = auth.store.increment_counter(&cred.id)?;
     let mut auth_data = Vec::with_capacity(37);
     auth_data.extend_from_slice(rp_id_hash);
-    auth_data.push(flags | if extensions.is_some() { FLAG_ED } else { 0 });
+    auth_data.push(flags | if extensions.is_empty() { 0 } else { FLAG_ED });
     auth_data.extend_from_slice(&counter.to_be_bytes());
-    if let Some(ext) = &extensions {
-        auth_data.extend(cbor::encode(ext));
+    if !extensions.is_empty() {
+        auth_data.extend(cbor::encode(&map(extensions)));
     }
     let signature = crypto::sign(&cred.private_key, &[auth_data.as_slice(), client_data_hash].concat())?;
 

@@ -50,6 +50,9 @@ pub struct Credential {
     /// 32-byte largeBlobKey, if created with the largeBlobKey extension.
     #[serde(default, with = "serde_bytes")]
     pub large_blob_key: Option<Vec<u8>>,
+    /// Small RP-supplied blob from the credBlob extension.
+    #[serde(default, with = "serde_bytes")]
+    pub cred_blob: Option<Vec<u8>>,
 }
 
 /// credProtect policy: when a credential may be used without user verification (PIN).
