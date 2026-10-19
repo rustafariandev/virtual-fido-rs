@@ -1,8 +1,9 @@
 //! authenticatorCredentialManagement (0x0A, and 0x41, the FIDO_2_1_PRE prototype with
 //! the same layout): list, delete and rename resident credentials.
 //!
-//! Requests need a pinUvAuthToken with the credential management (cm) permission. A
-//! token bound to an RP can only list, delete or update that RP's credentials.
+//! Requests need a pinUvAuthToken with the credential management (cm) permission
+//! (tokens from the legacy getPinToken have it). A token bound to an RP can only list,
+//! delete or update that RP's credentials.
 
 use std::collections::BTreeMap;
 

@@ -929,7 +929,13 @@ fn credential_management() {
     assert_eq!(c.cred_mgmt(0x0A, 1, None, None).0, 0x36);
     assert_eq!(c.set_pin(p, "1234"), 0);
     let legacy = c.pin_token(p, "1234").unwrap();
-    assert_eq!(c.cred_mgmt(0x0A, 1, None, Some((p, &legacy))).0, 0x33, "getPinToken tokens lack the cm permission");
+    // Pre-2.1 clients (e.g. solo-python) manage credentials with getPinToken tokens.
+    for cmd in [0x0A, 0x41] {
+        let (status, meta) = c.cred_mgmt(cmd, 1, None, Some((p, &legacy)));
+        assert_eq!((status, get(&meta, 1)), (0, Some(&int(3))), "legacy token on {cmd:#04x}");
+    }
+    let mc_only = c.pin_token_with(p, "1234", PERM_MC, None).unwrap();
+    assert_eq!(c.cred_mgmt(0x0A, 1, None, Some((p, &mc_only))).0, 0x33, "2.1 tokens need the cm permission");
     let token = c.pin_token_with(p, "1234", 0x04, None).unwrap();
     let auth = Some((p, token.as_slice()));
     assert_eq!(c.cred_mgmt(0x0A, 1, None, Some((p, &[0u8; 32]))).0, 0x33, "wrong token");

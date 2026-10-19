@@ -127,12 +127,15 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8]) -> CmdResult {
         }
         SUB_SET_PIN => set_pin(auth, protocol()?, &m),
         SUB_CHANGE_PIN => change_pin(auth, protocol()?, &m),
-        // The pre-2.1 command: a token for makeCredential and getAssertion only.
+        // The pre-2.1 command. Its tokens can create, sign in and manage credentials:
+        // pre-2.1 tools (e.g. python-fido2 0.9 / solo-python) list credentials with them,
+        // and the PIN that gets one could get a cm token through 0x09 anyway.
         SUB_GET_PIN_TOKEN => {
             if get(&m, 0x09).is_some() || get(&m, 0x0A).is_some() {
                 return Err(Status::INVALID_PARAMETER);
             }
-            get_token(auth, protocol()?, &m, PERM_MAKE_CREDENTIAL | PERM_GET_ASSERTION, None)
+            let permissions = PERM_MAKE_CREDENTIAL | PERM_GET_ASSERTION | PERM_CREDENTIAL_MGMT;
+            get_token(auth, protocol()?, &m, permissions, None)
         }
         SUB_GET_PIN_UV_AUTH_TOKEN_USING_PIN_WITH_PERMISSIONS => {
             let protocol = protocol()?;

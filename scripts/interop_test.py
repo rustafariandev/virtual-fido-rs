@@ -186,6 +186,9 @@ expect_error(
     CtapError.ERR.PIN_AUTH_INVALID,
     CredentialManagement(ctap, proto, pin.get_pin_token("hunter22", ClientPin.PERMISSION.MAKE_CREDENTIAL)).get_metadata,
 )
+# Pre-2.1 tools (solo-python, used by onlykey-cli) use a legacy getPinToken token.
+legacy = CredentialManagement(ctap, proto, pin.get_pin_token("hunter22"))
+assert legacy.get_metadata()[R.EXISTING_CRED_COUNT] == 3
 cm = CredentialManagement(ctap, proto, pin.get_pin_token("hunter22", ClientPin.PERMISSION.CREDENTIAL_MGMT))
 meta = cm.get_metadata()
 assert meta[R.EXISTING_CRED_COUNT] == 3, meta

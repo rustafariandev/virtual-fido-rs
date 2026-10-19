@@ -10,12 +10,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ctap_hid_fido2::fidokey::credential_management::credential_management_params::CredentialProtectionPolicy;
+use ctap_hid_fido2::fidokey::get_assertion::get_assertion_params::Assertion;
 use ctap_hid_fido2::fidokey::get_info::InfoOption;
+use ctap_hid_fido2::fidokey::make_credential::make_credential_params::Attestation;
 use ctap_hid_fido2::fidokey::{
     AssertionExtension as Gext, CredentialExtension as Mext, CredentialSupportedKeyType, GetAssertionArgsBuilder,
     MakeCredentialArgsBuilder,
 };
 use ctap_hid_fido2::public_key_credential_user_entity::PublicKeyCredentialUserEntity;
+use ctap_hid_fido2::verifier::AttestationVerifyResult;
 use ctap_hid_fido2::{verifier, Cfg, FidoKeyHid, HidParam};
 
 use virtual_fido::authenticator::DEFAULT_AAGUID;
@@ -85,8 +88,10 @@ impl VirtualKey {
         });
 
         let path = wait_for_hidraw(&name);
-        let fido = FidoKeyHid::new(&[HidParam::Path(path.clone())], &Cfg::init())
-            .unwrap_or_else(|e| panic!("open {path}: {e}"));
+        let mut cfg = Cfg::init();
+        cfg.enable_keep_alive_msg = false; // no "touch the sensor" lines in test output
+        let fido =
+            FidoKeyHid::new(&[HidParam::Path(path.clone())], &cfg).unwrap_or_else(|e| panic!("open {path}: {e}"));
         Some(VirtualKey { fido })
     }
 }
@@ -106,6 +111,27 @@ fn wait_for_hidraw(name: &str) -> String {
         std::thread::sleep(Duration::from_millis(50));
     }
     panic!("hidraw node for {name:?} did not appear");
+}
+
+/// Checks virtual-fido's packed *self*-attestation. ctap-hid-fido2's
+/// `verifier::verify_attestation` only handles attestation with an x5c certificate (it
+/// indexes `x5c[0]` and panics without one). A self-attestation signature, made with the
+/// credential key, covers the same `authData || SHA-256(challenge)` as an assertion
+/// signature, so the library's `verify_assertion` can check it.
+fn verify_self_attestation(rpid: &str, challenge: &[u8], attestation: &Attestation) -> AttestationVerifyResult {
+    assert_eq!(attestation.fmt, "packed");
+    assert!(attestation.attstmt_x5c.is_empty(), "expected self-attestation");
+    let as_assertion = Assertion {
+        rpid_hash: attestation.rpid_hash.clone(),
+        auth_data: attestation.auth_data.clone(),
+        signature: attestation.attstmt_sig.clone(),
+        ..Default::default()
+    };
+    AttestationVerifyResult {
+        is_success: verifier::verify_assertion(rpid, &attestation.credential_publickey, challenge, &as_assertion),
+        credential_id: attestation.credential_descriptor.id.clone(),
+        credential_public_key: attestation.credential_publickey.clone(),
+    }
 }
 
 fn user(id: &[u8], name: &str) -> PublicKeyCredentialUserEntity {
@@ -139,7 +165,7 @@ fn register_and_authenticate_without_pin() {
         let attestation = key.fido.make_credential_with_args(&args).unwrap();
         assert!(attestation.flags.user_present_result);
         assert!(!attestation.flags.user_verified_result);
-        let registered = verifier::verify_attestation(rpid, &challenge, &attestation);
+        let registered = verify_self_attestation(rpid, &challenge, &attestation);
         assert!(registered.is_success, "attestation ({key_type:?})");
 
         for expected_count in [1, 2] {
@@ -172,7 +198,7 @@ fn pin_and_resident_keys() {
             .build();
         let attestation = key.fido.make_credential_with_args(&args).unwrap();
         assert!(attestation.flags.user_verified_result);
-        assert!(verifier::verify_attestation(rpid, &challenge, &attestation).is_success);
+        assert!(verify_self_attestation(rpid, &challenge, &attestation).is_success);
     }
 
     // Discoverable sign-in returns both accounts (via getNextAssertion).
@@ -201,7 +227,7 @@ fn pin_protocol_two() {
     let challenge = verifier::create_challenge();
     let args = MakeCredentialArgsBuilder::new(rpid, &challenge).pin(PIN).build();
     let attestation = fido.make_credential_with_args(&args).unwrap();
-    let registered = verifier::verify_attestation(rpid, &challenge, &attestation);
+    let registered = verify_self_attestation(rpid, &challenge, &attestation);
     assert!(registered.is_success);
     let challenge = verifier::create_challenge();
     let args = GetAssertionArgsBuilder::new(rpid, &challenge).pin(PIN).credential_id(&registered.credential_id).build();
@@ -228,7 +254,7 @@ fn extensions() {
         ])
         .build();
     let attestation = key.fido.make_credential_with_args(&args).unwrap();
-    let registered = verifier::verify_attestation(rpid, &challenge, &attestation);
+    let registered = verify_self_attestation(rpid, &challenge, &attestation);
     assert!(registered.is_success);
     assert!(
         attestation.extensions.iter().any(|e| matches!(e, Mext::HmacSecret(Some(true)))),
@@ -267,8 +293,22 @@ fn extensions() {
 }
 
 #[test]
-fn credential_management() {
+fn credential_management_prototype() {
+    // ctap-hid-fido2's default: the FIDO_2_1_PRE command (0x41) with a getPinToken token.
     let key = virtual_key!();
+    assert!(key.fido.use_pre_credential_management);
+    credential_management(key);
+}
+
+#[test]
+fn credential_management_ctap21() {
+    // The CTAP 2.1 command (0x0A) with a token carrying the cm permission.
+    let mut key = virtual_key!();
+    key.fido.use_pre_credential_management = false;
+    credential_management(key);
+}
+
+fn credential_management(key: VirtualKey) {
     key.fido.set_new_pin(PIN).unwrap();
     for (rpid, id) in [("a.example", b"a1".as_slice()), ("b.example", b"b1"), ("b.example", b"b2")] {
         let challenge = verifier::create_challenge();
@@ -370,5 +410,5 @@ fn keepalives_while_waiting_for_touch() {
     let challenge = verifier::create_challenge();
     let args = MakeCredentialArgsBuilder::new(rpid, &challenge).without_pin_and_uv().build();
     let attestation = key.fido.make_credential_with_args(&args).unwrap();
-    assert!(verifier::verify_attestation(rpid, &challenge, &attestation).is_success);
+    assert!(verify_self_attestation(rpid, &challenge, &attestation).is_success);
 }
