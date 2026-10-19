@@ -1,7 +1,7 @@
 use ciborium::Value;
 
 use super::cbor::{bytes, int, map, text};
-use super::{cred_protect, hmac_secret};
+use super::{cred_protect, hmac_secret, large_blobs};
 use super::pin_protocol::PinProtocol;
 use super::CmdResult;
 use crate::authenticator::{Authenticator, MAX_MSG_SIZE};
@@ -10,7 +10,7 @@ use crate::crypto::COSE_ALG_ES256;
 pub(super) fn handle(auth: &Authenticator) -> CmdResult {
     Ok(Some(map(vec![
         (int(0x01), Value::Array(vec![text("U2F_V2"), text("FIDO_2_0"), text("FIDO_2_1_PRE")])),
-        (int(0x02), Value::Array(vec![text(cred_protect::NAME), text(hmac_secret::NAME)])),
+        (int(0x02), Value::Array(vec![text(cred_protect::NAME), text(hmac_secret::NAME), text(large_blobs::EXTENSION)])),
         (int(0x03), bytes(&auth.aaguid)),
         (
             int(0x04),
@@ -21,6 +21,7 @@ pub(super) fn handle(auth: &Authenticator) -> CmdResult {
                 (text("clientPin"), Value::Bool(auth.store.pin()?.is_some())),
                 (text("credMgmt"), Value::Bool(true)),
                 (text("credentialMgmtPreview"), Value::Bool(true)),
+                (text("largeBlobs"), Value::Bool(true)),
             ]),
         ),
         (int(0x05), int(MAX_MSG_SIZE as i64)),
@@ -30,5 +31,6 @@ pub(super) fn handle(auth: &Authenticator) -> CmdResult {
             int(0x0A),
             Value::Array(vec![map(vec![(text("alg"), int(COSE_ALG_ES256)), (text("type"), text("public-key"))])]),
         ),
+        (int(0x0B), int(large_blobs::MAX_SERIALIZED_SIZE as i64)),
     ])))
 }

@@ -194,6 +194,9 @@ fn credential_response(cred: &Credential, total: Option<usize>) -> Result<Value,
     if let Some(n) = total {
         entries.push((int(0x09), int(n as i64)));
     }
+    if let Some(key) = &cred.large_blob_key {
+        entries.push((int(0x0B), bytes(key)));
+    }
     Ok(map(entries))
 }
 

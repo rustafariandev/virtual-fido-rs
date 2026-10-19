@@ -7,6 +7,7 @@ mod cred_protect;
 mod get_assertion;
 mod get_info;
 mod hmac_secret;
+mod large_blobs;
 mod make_credential;
 pub mod pin_protocol;
 
@@ -18,6 +19,7 @@ use crate::presence::{PresenceKind, PresenceRequest};
 pub(crate) use client_pin::PinRuntime;
 pub(crate) use cred_mgmt::Enumeration;
 pub(crate) use get_assertion::Pending;
+pub(crate) use large_blobs::PendingWrite;
 
 /// CTAP2 status code, the first byte of every response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +30,7 @@ impl Status {
     pub const INVALID_COMMAND: Status = Status(0x01);
     pub const INVALID_PARAMETER: Status = Status(0x02);
     pub const INVALID_LENGTH: Status = Status(0x03);
+    pub const INVALID_SEQ: Status = Status(0x04);
     pub const CBOR_UNEXPECTED_TYPE: Status = Status(0x11);
     pub const INVALID_CBOR: Status = Status(0x12);
     pub const MISSING_PARAMETER: Status = Status(0x14);
@@ -48,6 +51,8 @@ impl Status {
     pub const PIN_NOT_SET: Status = Status(0x35);
     pub const PIN_REQUIRED: Status = Status(0x36);
     pub const PIN_POLICY_VIOLATION: Status = Status(0x37);
+    pub const LARGE_BLOB_STORAGE_FULL: Status = Status(0x39);
+    pub const INTEGRITY_FAILURE: Status = Status(0x3C);
     pub const INVALID_SUBCOMMAND: Status = Status(0x3E);
     pub const OTHER: Status = Status(0x7F);
 }
@@ -66,6 +71,7 @@ pub const CMD_CLIENT_PIN: u8 = 0x06;
 pub const CMD_RESET: u8 = 0x07;
 pub const CMD_GET_NEXT_ASSERTION: u8 = 0x08;
 pub const CMD_CREDENTIAL_MANAGEMENT: u8 = 0x0A;
+pub const CMD_LARGE_BLOBS: u8 = 0x0C;
 /// FIDO_2_1_PRE prototype of credential management.
 pub const CMD_CREDENTIAL_MANAGEMENT_PRE: u8 = 0x41;
 
@@ -95,6 +101,7 @@ pub(crate) fn dispatch(auth: &mut Authenticator, req: &[u8], ctx: &RequestCtx) -
         CMD_RESET => reset(auth, ctx),
         CMD_GET_NEXT_ASSERTION => get_assertion::next(auth, ctx),
         CMD_CREDENTIAL_MANAGEMENT | CMD_CREDENTIAL_MANAGEMENT_PRE => cred_mgmt::handle(auth, params),
+        CMD_LARGE_BLOBS => large_blobs::handle(auth, params),
         _ => Err(Status::INVALID_COMMAND),
     };
     match result {
@@ -115,6 +122,7 @@ fn reset(auth: &mut Authenticator, ctx: &RequestCtx) -> CmdResult {
     auth.require_presence(&PresenceRequest { kind: PresenceKind::Reset, rp_id: None, user: None }, ctx)?;
     auth.store.reset()?;
     auth.pin.reset();
+    auth.large_blob_write = None;
     log::warn!("authenticator reset: all credentials deleted");
     Ok(None)
 }

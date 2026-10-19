@@ -198,4 +198,15 @@ impl CredentialStore for FileStore {
             Ok(())
         })
     }
+
+    fn large_blob(&self) -> Result<Option<Vec<u8>>> {
+        Ok(self.state.large_blob.clone())
+    }
+
+    fn set_large_blob(&mut self, data: Vec<u8>) -> Result<()> {
+        self.mutate(|s| {
+            s.large_blob = Some(data);
+            Ok(())
+        })
+    }
 }

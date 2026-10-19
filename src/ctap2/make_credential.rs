@@ -1,6 +1,6 @@
 use super::cbor::{self, as_array, as_bool, as_bytes, as_int, as_map, as_text, bytes, get, get_text, int, map, require, text};
 use super::client_pin::verify_pin_uv_auth;
-use super::{cred_mgmt, cred_protect, hmac_secret};
+use super::{cred_mgmt, cred_protect, hmac_secret, large_blobs};
 use super::{CmdResult, Status, FLAG_AT, FLAG_ED, FLAG_UP, FLAG_UV};
 use crate::authenticator::{now_millis, Authenticator, RequestCtx};
 use crate::crypto::{self, COSE_ALG_ES256};
@@ -52,6 +52,11 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
 
     let hmac_secret = hmac_secret::requested_at_creation(get(&m, 0x06))?;
     let cred_protect = cred_protect::requested(get(&m, 0x06))?;
+    let large_blob_key = large_blobs::requested(get(&m, 0x06))?.then(large_blobs::new_key);
+    if large_blob_key.is_some() && !rk {
+        // Only resident credentials can have large blobs.
+        return Err(Status::INVALID_OPTION);
+    }
 
     let presence = PresenceRequest {
         kind: PresenceKind::Register,
@@ -137,11 +142,16 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         created: now_millis(),
         hmac_secret: hmac_secret.then(hmac_secret::new_cred_random),
         cred_protect: cred_protect.unwrap_or(CredProtect::UvOptional),
+        large_blob_key: large_blob_key.clone(),
     })?;
 
-    Ok(Some(map(vec![
+    let mut response = vec![
         (int(0x01), text("packed")),
         (int(0x02), bytes(&auth_data)),
         (int(0x03), map(vec![(text("alg"), int(COSE_ALG_ES256)), (text("sig"), bytes(&signature))])),
-    ])))
+    ];
+    if let Some(key) = &large_blob_key {
+        response.push((int(0x05), bytes(key)));
+    }
+    Ok(Some(map(response)))
 }

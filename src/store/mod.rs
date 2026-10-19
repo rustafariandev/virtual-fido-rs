@@ -47,6 +47,9 @@ pub struct Credential {
     /// credProtect level. Absent in stores from older versions (= no protection).
     #[serde(default)]
     pub cred_protect: CredProtect,
+    /// 32-byte largeBlobKey, if created with the largeBlobKey extension.
+    #[serde(default, with = "serde_bytes")]
+    pub large_blob_key: Option<Vec<u8>>,
 }
 
 /// credProtect policy: when a credential may be used without user verification (PIN).
@@ -104,6 +107,9 @@ impl Drop for Credential {
         if let Some(s) = &mut self.hmac_secret {
             s.zeroize();
         }
+        if let Some(k) = &mut self.large_blob_key {
+            k.zeroize();
+        }
     }
 }
 
@@ -157,7 +163,8 @@ pub trait CredentialStore: Send {
     fn delete(&mut self, id: &[u8]) -> Result<bool>;
     /// Increments and returns the credential's signature counter.
     fn increment_counter(&mut self, id: &[u8]) -> Result<u32>;
-    /// Deletes all credentials and the PIN. Attestation material is kept.
+    /// Deletes all credentials, the PIN and the large-blob array. Attestation
+    /// material is kept.
     fn reset(&mut self) -> Result<()>;
     fn attestation(&self) -> Result<Option<AttestationMaterial>>;
     fn set_attestation(&mut self, attestation: AttestationMaterial) -> Result<()>;
@@ -165,6 +172,9 @@ pub trait CredentialStore: Send {
     fn pin(&self) -> Result<Option<PinState>>;
     /// Must be durable before returning: retry counters depend on it.
     fn set_pin(&mut self, pin: Option<PinState>) -> Result<()>;
+    /// The serialized large-blob array (CBOR array || truncated hash); `None` if never written.
+    fn large_blob(&self) -> Result<Option<Vec<u8>>>;
+    fn set_large_blob(&mut self, data: Vec<u8>) -> Result<()>;
 }
 
 #[derive(Debug, Default, Clone)]

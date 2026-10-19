@@ -661,7 +661,7 @@ fn hmac_secret_outputs() {
     for protocol in PinProtocol::SUPPORTED {
         let mut c = Client::new(Arc::new(AutoPresence));
         let (_, info) = c.ctap2(0x04, None);
-        assert_eq!(get(&info, 2), Some(&Value::Array(vec![text("credProtect"), text("hmac-secret")])));
+        assert_eq!(get(&info, 2), Some(&Value::Array(vec![text("credProtect"), text("hmac-secret"), text("largeBlobKey")])));
         hmac_secret_credential(&mut c, b"u1", None);
 
         let salt1 = [1u8; 32];
@@ -937,4 +937,140 @@ fn resident_key_capacity() {
     // Replacing an existing user's credential and non-resident credentials still work.
     assert_eq!(c.ctap2(0x01, Some(make_credential_params("example.com", &7u32.to_be_bytes(), "u", true, &[]))).0, 0);
     assert_eq!(c.ctap2(0x01, Some(make_credential_params("example.com", b"x", "u", false, &[]))).0, 0);
+}
+
+// ---- large blobs ------------------------------------------------------------------
+
+const MAX_FRAGMENT: usize = 1200 - 64;
+
+impl Client {
+    fn blob_read(&mut self, offset: usize, len: usize) -> (u8, Vec<u8>) {
+        let (status, resp) = self.ctap2(0x0C, Some(map(vec![(int(1), int(len as i64)), (int(3), int(offset as i64))])));
+        (status, resp.first().map(|_| get(&resp, 1).unwrap().as_bytes().unwrap().clone()).unwrap_or_default())
+    }
+
+    fn blob_read_all(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let (status, chunk) = self.blob_read(out.len(), MAX_FRAGMENT);
+            assert_eq!(status, 0);
+            let done = chunk.len() < MAX_FRAGMENT;
+            out.extend(chunk);
+            if done {
+                return out;
+            }
+        }
+    }
+
+    fn blob_write_fragment(&mut self, offset: usize, fragment: &[u8], total: Option<usize>, token: Option<(PinProtocol, &[u8])>) -> u8 {
+        let mut entries = vec![(int(2), bytes(fragment)), (int(3), int(offset as i64))];
+        if let Some(t) = total {
+            entries.push((int(4), int(t as i64)));
+        }
+        if let Some((p, token)) = token {
+            let msg = [&[0xffu8; 32][..], &[0x0c, 0x00], &(offset as u32).to_le_bytes(), &sha256(fragment)].concat();
+            entries.push((int(5), bytes(&p.authenticate(token, &msg))));
+            entries.push((int(6), int(p.id())));
+        }
+        self.ctap2(0x0C, Some(map(entries))).0
+    }
+
+    /// Writes `serialized` in maximal fragments; returns the last status.
+    fn blob_write_all(&mut self, serialized: &[u8], token: Option<(PinProtocol, &[u8])>) -> u8 {
+        for (i, chunk) in serialized.chunks(MAX_FRAGMENT).enumerate() {
+            let offset = i * MAX_FRAGMENT;
+            let status = self.blob_write_fragment(offset, chunk, (offset == 0).then_some(serialized.len()), token);
+            if status != 0 {
+                return status;
+            }
+        }
+        0
+    }
+}
+
+/// CBOR array of `entries` byte strings || LEFT(SHA-256, 16).
+fn serialized_blob_array(entries: &[&[u8]]) -> Vec<u8> {
+    let mut data = Vec::new();
+    ciborium::ser::into_writer(&Value::Array(entries.iter().map(|e| bytes(e)).collect()), &mut data).unwrap();
+    let hash = sha256(&data);
+    data.extend_from_slice(&hash[..16]);
+    data
+}
+
+#[test]
+fn large_blob_array_reads_and_writes() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let (_, info) = c.ctap2(0x04, None);
+    assert_eq!(get_text(get(&info, 4).unwrap().as_map().unwrap(), "largeBlobs").unwrap().as_bool(), Some(true));
+    assert_eq!(get(&info, 0x0B), Some(&int(4096)));
+    assert_eq!(c.blob_read_all(), serialized_blob_array(&[]), "starts as the empty array");
+
+    // A three-fragment write, read back in fragments.
+    let big = vec![0x5Au8; 3000];
+    let data = serialized_blob_array(&[&big, b"second"]);
+    assert!(data.len() > 2 * MAX_FRAGMENT);
+    assert_eq!(c.blob_write_all(&data, None), 0);
+    assert_eq!(c.blob_read_all(), data);
+    let (status, slice) = c.blob_read(100, 10);
+    assert_eq!((status, slice.as_slice()), (0, &data[100..110]));
+    assert_eq!(c.blob_read(data.len() + 1, 10).0, 0x02, "offset past the end");
+    assert_eq!(c.blob_read(0, MAX_FRAGMENT + 1).0, 0x03, "fragment too long");
+
+    // Protocol errors leave the stored array untouched.
+    let next = serialized_blob_array(&[b"x"]);
+    assert_eq!(c.blob_write_fragment(5, &next, None, None), 0x04, "no write in progress");
+    assert_eq!(c.blob_write_fragment(0, &next, None, None), 0x02, "length missing at offset 0");
+    assert_eq!(c.blob_write_fragment(0, &next[..4], Some(next.len()), None), 0);
+    assert_eq!(c.blob_write_fragment(5, &next[4..], None, None), 0x04, "gap");
+    assert_eq!(c.blob_write_fragment(4, &next[4..], Some(next.len()), None), 0x02, "length after offset 0");
+    assert_eq!(c.blob_write_fragment(0, &[0; 10], Some(5000), None), 0x39, "too big");
+    let mut corrupt = next.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    assert_eq!(c.blob_write_all(&corrupt, None), 0x3C, "bad hash");
+    assert_eq!(c.blob_read_all(), data);
+
+    // Once a PIN is set, writes need it.
+    let p = PinProtocol::V2;
+    assert_eq!(c.set_pin(p, "1234"), 0);
+    assert_eq!(c.blob_write_all(&next, None), 0x36);
+    let token = c.pin_token(p, "1234").unwrap();
+    assert_eq!(c.blob_write_all(&next, Some((p, &[0u8; 32]))), 0x33);
+    assert_eq!(c.blob_write_all(&next, Some((p, &token))), 0);
+    assert_eq!(c.blob_read_all(), next);
+
+    assert_eq!(c.ctap2(0x07, None).0, 0);
+    assert_eq!(c.blob_read_all(), serialized_blob_array(&[]), "reset clears it");
+}
+
+#[test]
+fn large_blob_keys() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let lbk = || map(vec![(text("largeBlobKey"), Value::Bool(true))]);
+    let non_resident = with_extensions(make_credential_params("example.com", b"u", "u", false, &[]), 6, lbk());
+    assert_eq!(c.ctap2(0x01, Some(non_resident)).0, 0x2C, "resident keys only");
+    let bad = with_extensions(make_credential_params("example.com", b"u", "u", true, &[]), 6, map(vec![(text("largeBlobKey"), Value::Bool(false))]));
+    assert_eq!(c.ctap2(0x01, Some(bad)).0, 0x2C);
+
+    let (status, resp) = c.ctap2(0x01, Some(with_extensions(make_credential_params("example.com", b"u", "u", true, &[]), 6, lbk())));
+    assert_eq!(status, 0);
+    let key = get(&resp, 5).unwrap().as_bytes().unwrap().clone();
+    assert_eq!(key.len(), 32);
+    let cred = parse_make_credential("example.com", &resp);
+    assert_eq!(auth_data_extensions(get(&resp, 2).unwrap().as_bytes().unwrap()).1, None, "not an authData extension");
+
+    let cdh = [0; 32];
+    let (_, plain) = c.ctap2(0x02, Some(get_assertion_params("example.com", &cdh, &[])));
+    assert!(get(&plain, 7).is_none(), "only when asked");
+    let (status, resp) = c.ctap2(0x02, Some(with_extensions(get_assertion_params("example.com", &cdh, &[&cred.id]), 4, lbk())));
+    assert_eq!(status, 0);
+    assert_eq!(get(&resp, 7).unwrap().as_bytes().unwrap(), &key);
+
+    // Credential management shows it too.
+    let p = PinProtocol::V1;
+    assert_eq!(c.set_pin(p, "1234"), 0);
+    let token = c.pin_token(p, "1234").unwrap();
+    let rp_hash = map(vec![(int(1), bytes(&sha256(b"example.com")))]);
+    let (status, listed) = c.cred_mgmt(0x0A, 4, Some(rp_hash), Some((p, &token)));
+    assert_eq!(status, 0);
+    assert_eq!(get(&listed, 0x0B).unwrap().as_bytes().unwrap(), &key);
 }

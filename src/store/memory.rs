@@ -12,6 +12,9 @@ pub struct StoreState {
     /// Absent in stores written before PIN support.
     #[serde(default)]
     pub pin: Option<PinState>,
+    /// Absent in stores written before largeBlob support.
+    #[serde(default, with = "serde_bytes")]
+    pub large_blob: Option<Vec<u8>>,
 }
 
 impl StoreState {
@@ -48,6 +51,7 @@ impl StoreState {
     pub fn reset(&mut self) {
         self.credentials.clear();
         self.pin = None;
+        self.large_blob = None;
     }
 
     pub fn increment_counter(&mut self, id: &[u8]) -> Result<u32> {
@@ -113,6 +117,15 @@ impl CredentialStore for MemoryStore {
 
     fn set_pin(&mut self, pin: Option<PinState>) -> Result<()> {
         self.state.pin = pin;
+        Ok(())
+    }
+
+    fn large_blob(&self) -> Result<Option<Vec<u8>>> {
+        Ok(self.state.large_blob.clone())
+    }
+
+    fn set_large_blob(&mut self, data: Vec<u8>) -> Result<()> {
+        self.state.large_blob = Some(data);
         Ok(())
     }
 }

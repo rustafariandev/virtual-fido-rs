@@ -5,11 +5,12 @@ through `/dev/uhid`, so browsers (WebAuthn), libfido2, `ssh-keygen -t ecdsa-sk` 
 anything else that talks to hardware keys will see it as a plugged-in key.
 
 Supported: CTAPHID transport (keepalive, cancel, multiple channels), CTAP2 `getInfo`,
-`makeCredential`, `getAssertion`, `getNextAssertion`, `reset`, `credentialManagement`, `clientPIN`
-(PIN/UV auth protocols 1 and 2), the `hmac-secret` and `credProtect` extensions,
+`makeCredential`, `getAssertion`, `getNextAssertion`, `reset`, `credentialManagement`, `largeBlobs`, `clientPIN`
+(PIN/UV auth protocols 1 and 2), the `hmac-secret`, `credProtect` and `largeBlobKey`
+extensions,
 resident (discoverable) keys, ES256 with packed self-attestation, and the CTAP1/U2F
 `REGISTER` / `AUTHENTICATE` / `VERSION` commands. Not supported yet: other extensions
-(`largeBlob`, `credBlob`, …), CTAP 2.1 permission-scoped PIN tokens.
+(`credBlob`, `minPinLength`, …), CTAP 2.1 permission-scoped PIN tokens.
 
 > **Security note.** This is a *software* key: private keys live in a file (or in
 > memory) on this machine, not in tamper-resistant hardware. Anyone who gets the
@@ -120,6 +121,15 @@ are accepted. Requests are authorized with an ordinary PIN token, as on pre-2.1 
 because CTAP 2.1 permission-scoped tokens aren't implemented: any client holding a
 current PIN token could also manage credentials.
 
+## Large blobs
+
+The key keeps a small array (up to 4096 bytes serialized) on behalf of clients, which
+use it for per-credential data, such as the WebAuthn `largeBlob`
+extension. Each resident credential created with the `largeBlobKey` extension gets a
+32-byte key, returned at creation and on sign-in; clients encrypt their own entries
+with it, and the key never looks inside them. Anyone can read the array; once a PIN
+is set, writing it needs the PIN. Reset empties it.
+
 ## Try it
 
 ```sh
@@ -136,7 +146,7 @@ Storage and user presence are traits, picked by name at startup.
 
 - **Storage**: implement `store::CredentialStore` (`put`, `get`, `list_by_rp`,
   `list_all`, `delete`, `increment_counter`, `reset`, `attestation`, `set_attestation`,
-  `pin`, `set_pin`) and
+  `pin`, `set_pin`, `large_blob`, `set_large_blob`) and
   add a match arm in `store::open`. `set_pin` must be durable before it returns, since
   the PIN retry counter relies on it. `MemoryStore` (`src/store/memory.rs`) is the simplest example.
 - **Presence**: implement `presence::PresenceProvider::request`, which blocks until the

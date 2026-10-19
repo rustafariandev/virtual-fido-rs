@@ -50,6 +50,7 @@ pub struct Authenticator {
     pub(crate) pending_assertions: Option<ctap2::Pending>,
     pub(crate) pin: ctap2::PinRuntime,
     pub(crate) cred_mgmt: Option<ctap2::Enumeration>,
+    pub(crate) large_blob_write: Option<ctap2::PendingWrite>,
     pub(crate) u2f_presence: Option<u2f::PendingPresence>,
 }
 
@@ -62,6 +63,7 @@ impl Authenticator {
             pending_assertions: None,
             pin: ctap2::PinRuntime::new(),
             cred_mgmt: None,
+            large_blob_write: None,
             u2f_presence: None,
         }
     }

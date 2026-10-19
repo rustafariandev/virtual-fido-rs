@@ -15,8 +15,9 @@ import sys
 from fido2.attestation import Attestation
 from fido2.ctap import CtapError
 from fido2.ctap2 import ClientPin, Ctap2
+from fido2.ctap2.blob import LargeBlobs
 from fido2.ctap2.credman import CredentialManagement
-from fido2.ctap2.extensions import CredProtectExtension, HmacSecretExtension
+from fido2.ctap2.extensions import CredProtectExtension, HmacSecretExtension, LargeBlobKeyExtension
 from fido2.ctap2.pin import PinProtocolV1, PinProtocolV2
 from fido2.hid import CtapHidDevice
 from fido2.hid.base import CtapHidConnection, HidDescriptor
@@ -181,6 +182,29 @@ remaining = cm.enumerate_creds(rps[1][R.RP_ID_HASH])
 assert [c[R.USER]["name"] for c in remaining] == ["alice"]
 assert cm.get_metadata()[R.EXISTING_CRED_COUNT] == 2
 print("credential management: metadata / enumerate RPs and credentials / delete OK")
+
+# Large blobs: python-fido2 encrypts entries with the credential's largeBlobKey.
+# (python-fido2 0.9 sends `length` on every fragment, which CTAP 2.1 only allows on
+# the first, so keep the array within one fragment here.)
+ctap.reset()
+assert ctap.get_info().options["largeBlobs"] is True
+lbk = LargeBlobKeyExtension(ctap).process_create_input({"largeBlobKey": True})
+cdh = os.urandom(32)
+att = ctap.make_credential(
+    cdh, rp, {"id": b"dan", "name": "dan"}, key_params, extensions={"largeBlobKey": lbk}, options={"rk": True}
+)
+key = att.large_blob_key
+assert key is not None and len(key) == 32
+blobs = LargeBlobs(ctap)
+assert blobs.read_blob_array() == []
+blobs.put_blob(key, b"certificate or other per-credential data" * 5)
+cdh = os.urandom(32)
+assertion = ctap.get_assertion(rp["id"], cdh, extensions={"largeBlobKey": True})
+assert assertion.large_blob_key == key
+assert blobs.get_blob(assertion.large_blob_key) == b"certificate or other per-credential data" * 5
+blobs.delete_blob(key)
+assert blobs.get_blob(key) is None
+print("largeBlob: key via makeCredential/getAssertion, put / get / delete blob OK")
 
 dev.close()
 print("OK")
