@@ -222,6 +222,16 @@ scripts/run-root-tests.sh
 
 The real-device tests need the libudev headers to build (`dnf install systemd-devel`).
 
+To check a running virtual-fido end to end with OpenSSH (ssh-keygen, ssh-agent,
+`ssh-add -K`), with the virtual key as the only FIDO device attached and a PIN set:
+
+```sh
+VFIDO_PIN=123456 scripts/ssh_agent_test.sh
+```
+
+It leaves three `ssh:vfido-test-*` resident credentials on the key; run the key with
+`--store memory` to discard them.
+
 CI (`.github/workflows/ci.yml`, GitHub Actions) runs all of these on every push and
 pull request: rustfmt and clippy, `cargo test`, the python-fido2 interop script, and
 the real-device tests as root on the runner.
