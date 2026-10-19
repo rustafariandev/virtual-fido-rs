@@ -86,3 +86,56 @@ pub fn as_int(v: &Value) -> Result<i128, Status> {
 pub fn opt_text(map: &[(Value, Value)], key: &str) -> Result<Option<String>, Status> {
     get_text(map, key).map(|v| as_text(v).map(str::to_owned)).transpose()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_uses_ctap2_canonical_order() {
+        let m = map(vec![
+            (text("rk"), int(0)),
+            (int(-1), int(0)),
+            (int(24), int(0)),
+            (text("a"), int(0)),
+            (int(1), int(0)),
+            (text("up"), int(0)),
+            (int(-25), int(0)),
+        ]);
+        let keys: Vec<Vec<u8>> = m.as_map().unwrap().iter().map(|(k, _)| encode(k)).collect();
+        // Shorter encodings first, then bytewise: so ints before text, positive before negative.
+        assert_eq!(
+            keys,
+            [
+                vec![0x01],
+                vec![0x20],
+                vec![0x18, 24],
+                vec![0x38, 24],
+                vec![0x61, b'a'],
+                encode(&text("rk")),
+                encode(&text("up"))
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_map_errors() {
+        assert_eq!(decode_map(&[]).unwrap(), Vec::new());
+        assert_eq!(decode_map(&[0xA1, 0x01, 0x02]).unwrap(), vec![(int(1), int(2))]);
+        assert_eq!(decode_map(&[0x80]).unwrap_err(), Status::CBOR_UNEXPECTED_TYPE);
+        assert_eq!(decode_map(&[0xA1, 0x01]).unwrap_err(), Status::INVALID_CBOR);
+    }
+
+    #[test]
+    fn getters_match_key_type_and_value_type() {
+        let m = vec![(int(-1), bytes(b"x")), (text("name"), text("alice")), (int(3), Value::Bool(true))];
+        assert_eq!(as_bytes(get(&m, -1).unwrap()).unwrap(), b"x");
+        assert!(get(&m, 1).is_none());
+        assert!(get_text(&m, "-1").is_none());
+        assert_eq!(opt_text(&m, "name").unwrap().as_deref(), Some("alice"));
+        assert_eq!(opt_text(&m, "missing").unwrap(), None);
+        assert!(as_bool(get(&m, 3).unwrap()).unwrap());
+        assert_eq!(as_int(get(&m, 3).unwrap()).unwrap_err(), Status::CBOR_UNEXPECTED_TYPE);
+        assert_eq!(require(get(&m, 9)).unwrap_err(), Status::MISSING_PARAMETER);
+    }
+}

@@ -221,3 +221,89 @@ impl CredentialStore for FileStore {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::memory::tests::cred;
+
+    const FAST: KdfParams = KdfParams { m_cost: 64, t_cost: 1, p_cost: 1 };
+
+    #[test]
+    fn every_mutation_is_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/dir/store.bin");
+        {
+            let mut s = FileStore::open_with_params(&path, "pw", FAST).unwrap();
+            s.put(cred(1, 0xA, Some(b"u"), true, 1)).unwrap();
+            s.put(cred(2, 0xA, None, false, 2)).unwrap();
+            s.increment_counter(&[1; 16]).unwrap();
+            s.delete(&[2; 16]).unwrap();
+            s.set_pin(Some(PinState { pin_hash: [7; 16], retries: 5, code_points: None, force_change: true })).unwrap();
+            s.set_large_blob(vec![1, 2, 3]).unwrap();
+            s.set_config(AuthenticatorConfig { min_pin_length: 8, ..Default::default() }).unwrap();
+        }
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        assert!(!path.with_extension("tmp").exists());
+
+        let s = FileStore::open(&path, "pw").unwrap();
+        let creds = s.list_all().unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].sign_count, 1);
+        assert_eq!(s.pin().unwrap().unwrap().retries, 5);
+        assert!(s.pin().unwrap().unwrap().force_change);
+        assert_eq!(s.large_blob().unwrap(), Some(vec![1, 2, 3]));
+        assert_eq!(s.config().unwrap().min_pin_length, 8);
+    }
+
+    #[test]
+    fn kdf_params_are_stored_in_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.bin");
+        FileStore::open_with_params(&path, "pw", FAST).unwrap();
+        let data = fs::read(&path).unwrap();
+        assert_eq!(&data[..8], MAGIC);
+        assert_eq!(&data[8..20], &[64, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]);
+        // Reopening uses the header's parameters, not the defaults passed here.
+        FileStore::open_with_params(&path, "pw", KdfParams::default()).unwrap();
+    }
+
+    #[test]
+    fn rejects_foreign_and_tampered_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.bin");
+        fs::write(&path, b"not a store at all, just some bytes").unwrap();
+        assert!(FileStore::open(&path, "pw").err().unwrap().to_string().contains("not a virtual-fido store"));
+        fs::write(&path, b"VFIDOST1").unwrap();
+        assert!(FileStore::open(&path, "pw").is_err(), "truncated");
+
+        fs::remove_file(&path).unwrap();
+        FileStore::open_with_params(&path, "pw", FAST).unwrap();
+        let good = fs::read(&path).unwrap();
+
+        // The salt is authenticated as associated data; the ciphertext by the GCM tag.
+        for at in [25, HEADER_LEN + NONCE_LEN + 1, good.len() - 1] {
+            let mut bad = good.clone();
+            bad[at] ^= 1;
+            fs::write(&path, &bad).unwrap();
+            let err = FileStore::open(&path, "pw").err().unwrap().to_string();
+            assert!(err.contains("wrong passphrase or corrupted"), "byte {at}: {err}");
+        }
+    }
+
+    #[test]
+    fn each_save_uses_a_fresh_nonce() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.bin");
+        let mut s = FileStore::open_with_params(&path, "pw", FAST).unwrap();
+        let before = fs::read(&path).unwrap();
+        s.set_large_blob(Vec::new()).unwrap();
+        s.set_large_blob(Vec::new()).unwrap();
+        let a = fs::read(&path).unwrap();
+        s.set_large_blob(Vec::new()).unwrap();
+        let b = fs::read(&path).unwrap();
+        assert_eq!(before[..HEADER_LEN], a[..HEADER_LEN]);
+        assert_ne!(a[HEADER_LEN..HEADER_LEN + NONCE_LEN], b[HEADER_LEN..HEADER_LEN + NONCE_LEN]);
+    }
+}

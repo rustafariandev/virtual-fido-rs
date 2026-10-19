@@ -273,3 +273,51 @@ fn read_passphrase(opts: &StoreOptions, creating: bool) -> Result<Zeroizing<Stri
     }
     Ok(pass)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cred_protect_policy() {
+        use CredProtect::*;
+        // (level, uv, listed) -> allowed
+        for (level, cases) in [
+            (UvOptional, [true, true, true, true]),
+            (UvOptionalWithCredentialIdList, [false, true, true, true]),
+            (UvRequired, [false, false, true, true]),
+        ] {
+            let got = [
+                level.allows(false, false),
+                level.allows(false, true),
+                level.allows(true, false),
+                level.allows(true, true),
+            ];
+            assert_eq!(got, cases, "{level:?}");
+        }
+    }
+
+    #[test]
+    fn cred_protect_levels_round_trip() {
+        for level in 1..=3u8 {
+            assert_eq!(u8::from(CredProtect::try_from(level).unwrap()), level);
+        }
+        assert!(CredProtect::try_from(0).is_err());
+        assert!(CredProtect::try_from(4).is_err());
+    }
+
+    #[test]
+    fn unknown_backend_is_an_error() {
+        let err = open("nope", &StoreOptions::default()).err().unwrap();
+        assert!(err.to_string().contains("memory, file"), "{err}");
+    }
+
+    #[test]
+    fn passphrase_file_drops_trailing_newlines_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pass");
+        std::fs::write(&file, " secret \r\n\n").unwrap();
+        let opts = StoreOptions { path: None, passphrase_file: Some(file) };
+        assert_eq!(read_passphrase(&opts, true).unwrap().as_str(), " secret ");
+    }
+}

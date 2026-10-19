@@ -1544,3 +1544,264 @@ fn ctap21_authenticator_config() {
     assert_eq!(get(&info, 0x0D), Some(&int(4)));
     assert_eq!(info_option(&info, "alwaysUv"), Some(false));
 }
+
+// ---- CTAPHID framing ----------------------------------------------------------------
+
+/// A raw init packet; `len` is the declared message length, which may exceed `data`.
+fn init_packet(cid: u32, cmd: u8, len: u16, data: &[u8]) -> [u8; REPORT_SIZE] {
+    let mut pkt = [0u8; REPORT_SIZE];
+    pkt[..4].copy_from_slice(&cid.to_be_bytes());
+    pkt[4] = cmd | 0x80;
+    pkt[5..7].copy_from_slice(&len.to_be_bytes());
+    pkt[7..7 + data.len()].copy_from_slice(data);
+    pkt
+}
+
+fn cont_packet(cid: u32, seq: u8, data: &[u8]) -> [u8; REPORT_SIZE] {
+    let mut pkt = [0u8; REPORT_SIZE];
+    pkt[..4].copy_from_slice(&cid.to_be_bytes());
+    pkt[4] = seq;
+    pkt[5..5 + data.len()].copy_from_slice(data);
+    pkt
+}
+
+fn hid_error(code: u8) -> (u8, Vec<u8>) {
+    (ctaphid::CMD_ERROR, vec![code])
+}
+
+#[test]
+fn init_allocates_distinct_channels_and_resyncs() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let first = c.cid;
+    c.cid = BROADCAST_CID;
+    let (cmd, resp) = c.transact(ctaphid::CMD_INIT, &[7; 8]);
+    assert_eq!(cmd, ctaphid::CMD_INIT);
+    assert_eq!(resp.len(), 17);
+    assert_eq!(&resp[..8], &[7; 8]);
+    let second = u32::from_be_bytes(resp[8..12].try_into().unwrap());
+    assert_ne!(second, first);
+    assert_eq!(resp[12], 2, "CTAPHID protocol version");
+    assert_eq!(resp[16] & 0x05, 0x05, "WINK | CBOR capabilities");
+
+    // INIT on an allocated channel keeps its ID.
+    c.cid = first;
+    let (_, resp) = c.transact(ctaphid::CMD_INIT, &[8; 8]);
+    assert_eq!(u32::from_be_bytes(resp[8..12].try_into().unwrap()), first);
+    assert_eq!(c.transact(ctaphid::CMD_PING, b"ok"), (ctaphid::CMD_PING, b"ok".to_vec()));
+}
+
+#[test]
+fn init_requires_an_eight_byte_nonce() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    c.cid = BROADCAST_CID;
+    assert_eq!(c.transact(ctaphid::CMD_INIT, &[1; 4]), hid_error(ctaphid::ERR_INVALID_LEN));
+}
+
+#[test]
+fn broadcast_and_zero_channels_only_accept_init() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    c.cid = BROADCAST_CID;
+    assert_eq!(c.transact(ctaphid::CMD_PING, b"x"), hid_error(ctaphid::ERR_INVALID_CHANNEL));
+    c.cid = 0;
+    assert_eq!(c.transact(ctaphid::CMD_INIT, &[0; 8]), hid_error(ctaphid::ERR_INVALID_CHANNEL));
+}
+
+#[test]
+fn wink_and_unknown_commands() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    assert_eq!(c.transact(ctaphid::CMD_WINK, &[]), (ctaphid::CMD_WINK, vec![]));
+    assert_eq!(c.transact(ctaphid::CMD_LOCK, &[1]), hid_error(ctaphid::ERR_INVALID_CMD));
+    assert_eq!(c.transact(0x55, &[]), hid_error(ctaphid::ERR_INVALID_CMD));
+}
+
+#[test]
+fn oversized_message_is_rejected() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let len = (ctaphid::MAX_MESSAGE + 1) as u16;
+    c.server.handle_report(&init_packet(c.cid, ctaphid::CMD_PING, len, &[]));
+    assert_eq!(c.recv(), hid_error(ctaphid::ERR_INVALID_LEN));
+}
+
+#[test]
+fn out_of_order_continuation_is_rejected() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    c.server.handle_report(&init_packet(c.cid, ctaphid::CMD_PING, 100, &[1; 57]));
+    c.server.handle_report(&cont_packet(c.cid, 1, &[2; 43]));
+    assert_eq!(c.recv(), hid_error(ctaphid::ERR_INVALID_SEQ));
+    // The channel recovers.
+    assert_eq!(c.transact(ctaphid::CMD_PING, b"again"), (ctaphid::CMD_PING, b"again".to_vec()));
+}
+
+#[test]
+fn stray_continuation_packets_are_ignored() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    c.server.handle_report(&cont_packet(c.cid, 0, &[1; 59]));
+    assert!(c.rx.recv_timeout(Duration::from_millis(100)).is_err(), "no response");
+    assert_eq!(c.transact(ctaphid::CMD_PING, b"x"), (ctaphid::CMD_PING, b"x".to_vec()));
+}
+
+#[test]
+fn other_channel_is_busy_during_reassembly() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let first = c.cid;
+    c.cid = BROADCAST_CID;
+    let (_, init) = c.transact(ctaphid::CMD_INIT, &[3; 8]);
+    let second = u32::from_be_bytes(init[8..12].try_into().unwrap());
+
+    let data: Vec<u8> = (0..100).collect();
+    c.cid = first;
+    c.server.handle_report(&init_packet(first, ctaphid::CMD_PING, 100, &data[..57]));
+    c.cid = second;
+    assert_eq!(c.transact(ctaphid::CMD_PING, b"x"), hid_error(ctaphid::ERR_CHANNEL_BUSY));
+
+    // The interrupted message still completes.
+    c.cid = first;
+    c.server.handle_report(&cont_packet(first, 0, &data[57..]));
+    assert_eq!(c.recv(), (ctaphid::CMD_PING, data));
+}
+
+#[test]
+fn new_init_packet_on_same_channel_abandons_partial_message() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    c.server.handle_report(&init_packet(c.cid, ctaphid::CMD_PING, 100, &[1; 57]));
+    assert_eq!(c.transact(ctaphid::CMD_PING, b"new"), (ctaphid::CMD_PING, b"new".to_vec()));
+}
+
+#[test]
+fn incomplete_message_times_out() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    c.server.handle_report(&init_packet(c.cid, ctaphid::CMD_PING, 100, &[1; 57]));
+    std::thread::sleep(Duration::from_millis(600));
+    // The timeout is noticed when the next report arrives.
+    c.send(ctaphid::CMD_PING, b"late");
+    assert_eq!(c.recv(), hid_error(ctaphid::ERR_MSG_TIMEOUT));
+    assert_eq!(c.recv(), (ctaphid::CMD_PING, b"late".to_vec()));
+}
+
+#[test]
+fn malformed_ctap2_requests() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let status = |c: &mut Client, req: &[u8]| c.transact(ctaphid::CMD_CBOR, req).1;
+    assert_eq!(status(&mut c, &[]), vec![0x03], "no command byte");
+    assert_eq!(status(&mut c, &[0x01, 0xFF]), vec![0x12], "invalid CBOR");
+    assert_eq!(status(&mut c, &[0x01, 0x80]), vec![0x11], "parameters are not a map");
+    assert_eq!(status(&mut c, &[0x01, 0xA0]), vec![0x14], "makeCredential without parameters");
+    assert_eq!(status(&mut c, &[0x02, 0xA0]), vec![0x14], "getAssertion without parameters");
+    // Requests that need no presence are answered without keepalives.
+    assert!(c.keepalives.is_empty());
+}
+
+// ---- U2F error paths ----------------------------------------------------------------
+
+fn u2f_register_apdu(app: &[u8; 32]) -> Vec<u8> {
+    let mut apdu = vec![0, 1, 3, 0, 64];
+    apdu.extend_from_slice(&[0xAA; 32]);
+    apdu.extend_from_slice(app);
+    apdu
+}
+
+fn u2f_authenticate_apdu(mode: u8, app: &[u8; 32], kh: &[u8]) -> Vec<u8> {
+    let mut apdu = vec![0, 2, mode, 0, (65 + kh.len()) as u8];
+    apdu.extend_from_slice(&[0xBB; 32]);
+    apdu.extend_from_slice(app);
+    apdu.push(kh.len() as u8);
+    apdu.extend_from_slice(kh);
+    apdu
+}
+
+#[test]
+fn u2f_rejects_malformed_requests() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    assert_eq!(c.u2f(&[1, 3, 0, 0, 0]).1, 0x6E00, "CLA");
+    assert_eq!(c.u2f(&[0, 0x40, 0, 0, 0]).1, 0x6D00, "INS");
+    assert_eq!(c.u2f(&[0, 1]).1, 0x6700, "short APDU");
+    assert_eq!(c.u2f(&[0, 1, 3, 0, 3, 1, 2, 3]).1, 0x6700, "register needs 64 bytes");
+    assert_eq!(c.u2f(&[0, 2, 3, 0, 3, 1, 2, 3]).1, 0x6700, "authenticate too short");
+    let mut bad_kh_len = u2f_authenticate_apdu(0x03, &[0; 32], &[0; 16]);
+    bad_kh_len[5 + 64] = 17;
+    assert_eq!(c.u2f(&bad_kh_len).1, 0x6700, "key handle length mismatch");
+}
+
+#[test]
+fn u2f_authenticate_checks_app_and_mode() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let app = sha256(b"https://example.com");
+    let (resp, sw) = c.u2f(&u2f_register_apdu(&app));
+    assert_eq!(sw, 0x9000);
+    let kh = resp[67..67 + resp[66] as usize].to_vec();
+    let key = VerifyingKey::from_sec1_bytes(&resp[1..66]).unwrap();
+
+    let other_app = sha256(b"https://evil.com");
+    assert_eq!(c.u2f(&u2f_authenticate_apdu(0x03, &other_app, &kh)).1, 0x6A80, "bound to its app");
+    assert_eq!(c.u2f(&u2f_authenticate_apdu(0x05, &app, &kh)).1, 0x6A80, "unknown control byte");
+
+    // dont-enforce-user-presence-and-sign: signs without the UP flag.
+    let (resp, sw) = c.u2f(&u2f_authenticate_apdu(0x08, &app, &kh));
+    assert_eq!(sw, 0x9000);
+    assert_eq!(resp[0], 0x00);
+    assert_eq!(&resp[1..5], &1u32.to_be_bytes());
+    let sig = Signature::from_der(&resp[5..]).unwrap();
+    key.verify(&[&app[..], &[0x00], &resp[1..5], &[0xBB; 32]].concat(), &sig).unwrap();
+
+    let (resp, _) = c.u2f(&u2f_authenticate_apdu(0x03, &app, &kh));
+    assert_eq!(&resp[1..5], &2u32.to_be_bytes(), "counter increments");
+}
+
+#[test]
+fn u2f_registration_is_attested_by_the_batch_key() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let app = sha256(b"https://example.com");
+    let (resp, sw) = c.u2f(&u2f_register_apdu(&app));
+    assert_eq!(sw, 0x9000);
+    let pubkey = &resp[1..66];
+    let kh = &resp[67..67 + resp[66] as usize];
+    let rest = &resp[67 + kh.len()..];
+    // The certificate is a DER SEQUENCE with a two-byte long-form length.
+    assert_eq!(&rest[..2], &[0x30, 0x82]);
+    let cert_len = 4 + u16::from_be_bytes([rest[2], rest[3]]) as usize;
+    let cert = &rest[..cert_len];
+    let sig = Signature::from_der(&rest[cert_len..]).unwrap();
+
+    // The registration is signed by the certificate's P-256 key, found by its SPKI header.
+    const P256_SPKI: &[u8] = &[
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x08, 0x2A, 0x86, 0x48,
+        0xCE, 0x3D, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+    ];
+    let at = cert.windows(P256_SPKI.len()).position(|w| w == P256_SPKI).expect("P-256 key in certificate");
+    let att_key = VerifyingKey::from_sec1_bytes(&cert[at + P256_SPKI.len()..][..65]).unwrap();
+    let signed = [&[0x00][..], &app, &[0xAA; 32], kh, pubkey].concat();
+    att_key.verify(&signed, &sig).unwrap();
+    assert!(VerifyingKey::from_sec1_bytes(pubkey).unwrap().verify(&signed, &sig).is_err());
+
+    // A second registration reuses the same batch certificate.
+    let (resp2, _) = c.u2f(&u2f_register_apdu(&app));
+    let kh2 = &resp2[67..67 + resp2[66] as usize];
+    assert_ne!(kh, kh2);
+    assert_eq!(&resp2[67 + kh2.len()..][..cert_len], cert);
+}
+
+#[test]
+fn u2f_waits_for_slow_presence() {
+    /// Approves after a delay, so the first U2F poll gets CONDITIONS_NOT_SATISFIED.
+    struct Slow;
+    impl PresenceProvider for Slow {
+        fn request(&self, _: &PresenceRequest, _: &CancelToken) -> Presence {
+            std::thread::sleep(Duration::from_millis(200));
+            Presence::Approved
+        }
+    }
+    let mut c = Client::new(Arc::new(Slow));
+    let app = sha256(b"https://example.com");
+    assert_eq!(c.u2f(&u2f_register_apdu(&app)).1, 0x6985);
+    let mut polls = 1;
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        let (_, sw) = c.u2f(&u2f_register_apdu(&app));
+        polls += 1;
+        if sw == 0x9000 {
+            break;
+        }
+        assert_eq!(sw, 0x6985);
+        assert!(polls < 40, "presence never arrived");
+    }
+}

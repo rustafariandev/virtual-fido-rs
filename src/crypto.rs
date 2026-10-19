@@ -153,3 +153,60 @@ pub fn generate_attestation() -> Result<AttestationMaterial> {
         .map_err(|e| Error::Crypto(format!("attestation key: {e}")))?;
     Ok(AttestationMaterial { private_key: secret.to_bytes().to_vec(), certificate: cert.der().to_vec() })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ctap2::cbor::get;
+
+    #[test]
+    fn signatures_verify_against_the_cose_public_key() {
+        let msg = b"authenticator data || client data hash";
+
+        let key = Algorithm::Es256.generate_private_key();
+        let cose = Algorithm::Es256.cose_public_key(&key).unwrap();
+        let cose = cose.as_map().unwrap();
+        let x = get(cose, -2).unwrap().as_bytes().unwrap();
+        let y = get(cose, -3).unwrap().as_bytes().unwrap();
+        assert_eq!([&[4u8][..], x, y].concat(), public_key_uncompressed(&key).unwrap());
+        let public = p256::ecdsa::VerifyingKey::from_sec1_bytes(&[&[4u8][..], x, y].concat()).unwrap();
+        let sig = Signature::from_der(&Algorithm::Es256.sign(&key, msg).unwrap()).unwrap();
+        use p256::ecdsa::signature::Verifier;
+        public.verify(msg, &sig).unwrap();
+        assert!(public.verify(b"other", &sig).is_err());
+
+        let key = Algorithm::Ed25519.generate_private_key();
+        let cose = Algorithm::Ed25519.cose_public_key(&key).unwrap();
+        let x: [u8; 32] = get(cose.as_map().unwrap(), -2).unwrap().as_bytes().unwrap()[..].try_into().unwrap();
+        let public = ed25519_dalek::VerifyingKey::from_bytes(&x).unwrap();
+        let sig: [u8; 64] = Algorithm::Ed25519.sign(&key, msg).unwrap().try_into().unwrap();
+        public.verify_strict(msg, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+    }
+
+    #[test]
+    fn invalid_private_keys_are_errors() {
+        assert!(Algorithm::Es256.sign(&[0; 32], b"m").is_err(), "zero scalar");
+        assert!(Algorithm::Es256.sign(&[1; 33], b"m").is_err(), "too long");
+        assert!(Algorithm::Ed25519.sign(&[1; 31], b"m").is_err());
+        assert!(public_key_uncompressed(&[]).is_err());
+    }
+
+    #[test]
+    fn cose_algorithm_ids() {
+        for alg in Algorithm::SUPPORTED {
+            assert_eq!(Algorithm::from_cose(alg.cose_id().into()), Some(alg));
+            assert_eq!(Algorithm::try_from(i64::from(alg)), Ok(alg));
+        }
+        assert_eq!(Algorithm::from_cose(-35), None);
+        assert!(Algorithm::try_from(-257).is_err());
+    }
+
+    #[test]
+    fn attestation_material_is_consistent() {
+        let att = generate_attestation().unwrap();
+        let public = public_key_uncompressed(&att.private_key).unwrap();
+        assert!(att.certificate.windows(65).any(|w| w == public), "certificate carries the key");
+        assert_ne!(sha256(b"a"), sha256(b"b"));
+        assert_ne!(random_bytes::<16>(), random_bytes::<16>());
+    }
+}
