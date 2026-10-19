@@ -6,10 +6,10 @@ anything else that talks to hardware keys will see it as a plugged-in key.
 
 Supported: CTAPHID transport (keepalive, cancel, multiple channels), CTAP2 `getInfo`,
 `makeCredential`, `getAssertion`, `getNextAssertion`, `reset`, `clientPIN`
-(PIN/UV auth protocols 1 and 2), the `hmac-secret` extension, resident (discoverable)
-keys, ES256 with packed self-attestation, and the CTAP1/U2F `REGISTER` /
-`AUTHENTICATE` / `VERSION` commands. Not supported yet: other extensions
-(`credProtect`, `largeBlob`, …), credential management, CTAP 2.1 permission-scoped
+(PIN/UV auth protocols 1 and 2), the `hmac-secret` and `credProtect` extensions,
+resident (discoverable) keys, ES256 with packed self-attestation, and the CTAP1/U2F
+`REGISTER` / `AUTHENTICATE` / `VERSION` commands. Not supported yet: other extensions
+(`largeBlob`, `credBlob`, …), credential management, CTAP 2.1 permission-scoped
 PIN tokens.
 
 > **Security note.** This is a *software* key: private keys live in a file (or in
@@ -82,6 +82,22 @@ each. The outputs are stable for a given credential and salt, so they can serve 
 keys, for example with `systemd-cryptenroll --fido2-device=auto` for disk unlocking or
 the WebAuthn PRF extension in browsers. Back up the store file if you depend on them:
 losing the credential means losing the derived key.
+
+## credProtect
+
+A client can give a credential a protection level when creating it:
+
+| level | without the PIN | with the PIN |
+|---|---|---|
+| 1 (default) | usable | usable |
+| 2 | usable only if the client names the credential ID; not discoverable | usable |
+| 3 | invisible, even by ID (and to U2F) | usable |
+
+Hidden credentials also don't trigger the exclude list, so a site can't use it to
+probe for them. A level 3 credential needs a PIN to be set before it can ever be used.
+OpenSSH asks for level 3 with `ssh-keygen -t ecdsa-sk -O verify-required`. Chrome
+asks for level 2 on discoverable credentials by default, so passkeys it creates only
+show up in username-less sign-in after you enter the PIN.
 
 ## Try it
 

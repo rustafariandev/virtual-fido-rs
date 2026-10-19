@@ -1,11 +1,11 @@
 use super::cbor::{self, as_array, as_bool, as_bytes, as_int, as_map, as_text, bytes, get, get_text, int, map, require, text};
 use super::client_pin::verify_pin_uv_auth;
-use super::hmac_secret;
+use super::{cred_protect, hmac_secret};
 use super::{CmdResult, Status, FLAG_AT, FLAG_ED, FLAG_UP, FLAG_UV};
 use crate::authenticator::{now_millis, Authenticator, RequestCtx};
 use crate::crypto::{self, COSE_ALG_ES256};
 use crate::presence::{PresenceKind, PresenceRequest};
-use crate::store::Credential;
+use crate::store::{CredProtect, Credential};
 
 const MAX_USER_ID_LEN: usize = 64;
 const CREDENTIAL_ID_LEN: usize = 16;
@@ -50,6 +50,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
     }
 
     let hmac_secret = hmac_secret::requested_at_creation(get(&m, 0x06))?;
+    let cred_protect = cred_protect::requested(get(&m, 0x06))?;
 
     let presence = PresenceRequest {
         kind: PresenceKind::Register,
@@ -65,7 +66,8 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
     if let Some(excluded) = get(&m, 0x05) {
         for d in as_array(excluded)? {
             let id = as_bytes(require(get_text(as_map(d)?, "id"))?)?;
-            if auth.store.get(id)?.is_some_and(|c| c.rp_id_hash == rp_id_hash) {
+            // A credProtect level 3 credential stays hidden unless the user was verified.
+            if auth.store.get(id)?.is_some_and(|c| c.rp_id_hash == rp_id_hash && c.cred_protect.allows(uv, true)) {
                 // The user must still touch the key so a site cannot silently probe it.
                 auth.require_presence(&presence, ctx)?;
                 return Err(Status::CREDENTIAL_EXCLUDED);
@@ -79,16 +81,25 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
     let id = crypto::random_bytes::<CREDENTIAL_ID_LEN>().to_vec();
     let cose_key = cbor::encode(&crypto::cose_public_key(&private_key)?);
 
+    let mut extensions = Vec::new();
+    if let Some(policy) = cred_protect {
+        extensions.push(cred_protect::creation_output(policy));
+    }
+    if hmac_secret {
+        extensions.push(hmac_secret::creation_output());
+    }
+
     let mut auth_data = Vec::with_capacity(37 + 18 + id.len() + cose_key.len());
     auth_data.extend_from_slice(&rp_id_hash);
-    auth_data.push(FLAG_UP | FLAG_AT | if uv { FLAG_UV } else { 0 } | if hmac_secret { FLAG_ED } else { 0 });
+    let ed = if extensions.is_empty() { 0 } else { FLAG_ED };
+    auth_data.push(FLAG_UP | FLAG_AT | if uv { FLAG_UV } else { 0 } | ed);
     auth_data.extend_from_slice(&0u32.to_be_bytes());
     auth_data.extend_from_slice(&auth.aaguid);
     auth_data.extend_from_slice(&(id.len() as u16).to_be_bytes());
     auth_data.extend_from_slice(&id);
     auth_data.extend_from_slice(&cose_key);
-    if hmac_secret {
-        auth_data.extend(cbor::encode(&hmac_secret::creation_output()));
+    if !extensions.is_empty() {
+        auth_data.extend(cbor::encode(&map(extensions)));
     }
 
     // Packed self-attestation: signed by the new credential key itself.
@@ -111,6 +122,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         discoverable: rk,
         created: now_millis(),
         hmac_secret: hmac_secret.then(hmac_secret::new_cred_random),
+        cred_protect: cred_protect.unwrap_or(CredProtect::UvOptional),
     })?;
 
     Ok(Some(map(vec![

@@ -32,9 +32,9 @@ pub(super) fn requested_at_creation(extensions: Option<&Value>) -> Result<bool, 
     }
 }
 
-/// makeCredential's extension output, `{"hmac-secret": true}`.
-pub(super) fn creation_output() -> Value {
-    map(vec![(text(NAME), Value::Bool(true))])
+/// makeCredential's extension output entry, `"hmac-secret": true`.
+pub(super) fn creation_output() -> (Value, Value) {
+    (text(NAME), Value::Bool(true))
 }
 
 /// A decrypted and authenticated getAssertion hmac-secret request.

@@ -45,6 +45,11 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         }
     }
 
+    // User verification comes first: credProtect decides which credentials are visible.
+    let mut presence = PresenceRequest { kind: PresenceKind::Authenticate, rp_id: Some(rp_id.clone()), user: None };
+    let uv = verify_pin_uv_auth(auth, get(&m, 0x06), get(&m, 0x07), &client_data_hash, &presence, ctx)?;
+    let hmac_secret = hmac_secret::parse_request(auth, get(&m, 0x04))?;
+
     let rp_id_hash = crypto::sha256(rp_id.as_bytes());
     let allow_list = match get(&m, 0x03) {
         Some(v) => as_array(v)?,
@@ -53,26 +58,24 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
     let mut creds = Vec::new();
     for d in allow_list {
         let id = as_bytes(require(get_text(as_map(d)?, "id"))?)?;
-        if let Some(c) = auth.store.get(id)?.filter(|c| c.rp_id_hash == rp_id_hash) {
+        if let Some(c) = auth.store.get(id)?.filter(|c| c.rp_id_hash == rp_id_hash && c.cred_protect.allows(uv, true)) {
             creds.push(c);
             break;
         }
     }
     let discovering = allow_list.is_empty();
     if discovering {
-        creds = auth.store.list_by_rp(&rp_id_hash)?.into_iter().filter(|c| c.discoverable).collect();
+        creds = auth
+            .store
+            .list_by_rp(&rp_id_hash)?
+            .into_iter()
+            .filter(|c| c.discoverable && c.cred_protect.allows(uv, false))
+            .collect();
     }
 
-    let presence = PresenceRequest {
-        kind: PresenceKind::Authenticate,
-        rp_id: Some(rp_id.clone()),
-        user: match creds.as_slice() {
-            [c] => c.user_display_name.clone().or_else(|| c.user_name.clone()),
-            _ => None,
-        },
-    };
-    let uv = verify_pin_uv_auth(auth, get(&m, 0x06), get(&m, 0x07), &client_data_hash, &presence, ctx)?;
-    let hmac_secret = hmac_secret::parse_request(auth, get(&m, 0x04))?;
+    if let [c] = creds.as_slice() {
+        presence.user = c.user_display_name.clone().or_else(|| c.user_name.clone());
+    }
     if creds.is_empty() {
         return Err(Status::NO_CREDENTIALS);
     }

@@ -41,6 +41,58 @@ pub struct Credential {
     /// credential was created with the extension. Absent in stores from older versions.
     #[serde(default, with = "serde_bytes")]
     pub hmac_secret: Option<Vec<u8>>,
+    /// credProtect level. Absent in stores from older versions (= no protection).
+    #[serde(default)]
+    pub cred_protect: CredProtect,
+}
+
+/// credProtect policy: when a credential may be used without user verification (PIN).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "u8", try_from = "u8")]
+pub enum CredProtect {
+    /// Level 1: always usable.
+    #[default]
+    UvOptional,
+    /// Level 2: without UV, only usable when the client names it (allow list / key
+    /// handle); it is not discoverable.
+    UvOptionalWithCredentialIdList,
+    /// Level 3: only usable with UV.
+    UvRequired,
+}
+
+impl CredProtect {
+    /// Whether the credential may be used, given whether the user was verified and
+    /// whether the client named the credential ID.
+    pub fn allows(self, user_verified: bool, id_listed: bool) -> bool {
+        match self {
+            CredProtect::UvOptional => true,
+            CredProtect::UvOptionalWithCredentialIdList => user_verified || id_listed,
+            CredProtect::UvRequired => user_verified,
+        }
+    }
+}
+
+impl From<CredProtect> for u8 {
+    fn from(p: CredProtect) -> u8 {
+        match p {
+            CredProtect::UvOptional => 1,
+            CredProtect::UvOptionalWithCredentialIdList => 2,
+            CredProtect::UvRequired => 3,
+        }
+    }
+}
+
+impl TryFrom<u8> for CredProtect {
+    type Error = String;
+
+    fn try_from(level: u8) -> std::result::Result<Self, String> {
+        match level {
+            1 => Ok(CredProtect::UvOptional),
+            2 => Ok(CredProtect::UvOptionalWithCredentialIdList),
+            3 => Ok(CredProtect::UvRequired),
+            other => Err(format!("invalid credProtect level {other}")),
+        }
+    }
 }
 
 impl Drop for Credential {
@@ -60,6 +112,7 @@ impl fmt::Debug for Credential {
             .field("user_name", &self.user_name)
             .field("sign_count", &self.sign_count)
             .field("discoverable", &self.discoverable)
+            .field("cred_protect", &self.cred_protect)
             .finish_non_exhaustive()
     }
 }

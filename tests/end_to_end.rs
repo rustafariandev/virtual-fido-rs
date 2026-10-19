@@ -661,7 +661,7 @@ fn hmac_secret_outputs() {
     for protocol in PinProtocol::SUPPORTED {
         let mut c = Client::new(Arc::new(AutoPresence));
         let (_, info) = c.ctap2(0x04, None);
-        assert_eq!(get(&info, 2), Some(&Value::Array(vec![text("hmac-secret")])));
+        assert_eq!(get(&info, 2), Some(&Value::Array(vec![text("credProtect"), text("hmac-secret")])));
         hmac_secret_credential(&mut c, b"u1", None);
 
         let salt1 = [1u8; 32];
@@ -714,4 +714,97 @@ fn hmac_secret_with_multiple_credentials() {
     let (status, second) = c.ctap2(0x08, None);
     assert_eq!(status, 0);
     assert_eq!(auth_data_extensions(get(&second, 2).unwrap().as_bytes().unwrap()), (0x01, None));
+}
+
+// ---- credProtect ------------------------------------------------------------------
+
+/// Creates a resident credential with credProtect `level` (and optionally hmac-secret).
+fn protected_credential(c: &mut Client, user: &[u8], level: i64, hmac: bool, pin: Option<(PinProtocol, &[u8])>) -> (u8, Option<NewCredential>, Option<Value>) {
+    let mut ext = vec![(text("credProtect"), int(level))];
+    if hmac {
+        ext.push((text("hmac-secret"), Value::Bool(true)));
+    }
+    let mut params = with_extensions(make_credential_params("example.com", user, "u", true, &[]), 6, map(ext));
+    if let Some((p, token)) = pin {
+        params = with_pin_auth(params, (8, 9), p, token, &[0x11; 32]);
+    }
+    let (status, resp) = c.ctap2(0x01, Some(params));
+    if status != 0 {
+        return (status, None, None);
+    }
+    let (_, ext) = auth_data_extensions(get(&resp, 2).unwrap().as_bytes().unwrap());
+    (status, Some(parse_make_credential("example.com", &resp)), ext)
+}
+
+#[test]
+fn cred_protect_levels() {
+    let p = PinProtocol::V2;
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let (_, cred2, ext) = protected_credential(&mut c, b"two", 2, false, None);
+    let cred2 = cred2.unwrap();
+    assert_eq!(ext, Some(map(vec![(text("credProtect"), int(2))])), "echoed in authData");
+    let (_, cred3, ext) = protected_credential(&mut c, b"three", 3, true, None);
+    let cred3 = cred3.unwrap();
+    assert_eq!(ext, Some(map(vec![(text("credProtect"), int(3)), (text("hmac-secret"), Value::Bool(true))])));
+    let (_, cred1, ext) = protected_credential(&mut c, b"one", 1, false, None);
+    let cred1 = cred1.unwrap();
+    assert_eq!(ext, Some(map(vec![(text("credProtect"), int(1))])));
+    // Unknown levels are ignored: no protection, nothing echoed.
+    let (status, _, ext) = protected_credential(&mut c, b"nine", 9, false, None);
+    assert_eq!((status, ext), (0, None));
+
+    let cdh = [0x77; 32];
+    let assert_with = |c: &mut Client, allow: &[&[u8]], token: Option<&[u8]>| {
+        let mut params = get_assertion_params("example.com", &cdh, allow);
+        if let Some(t) = token {
+            params = with_pin_auth(params, (6, 7), p, t, &cdh);
+        }
+        c.ctap2(0x02, Some(params))
+    };
+    let count = |resp: &[(Value, Value)]| get(resp, 5).map_or(1, |n| i128::from(n.as_integer().unwrap()));
+
+    // Without UV: discovery sees levels 1 and the ignored one, not 2 or 3.
+    let (status, resp) = assert_with(&mut c, &[], None);
+    assert_eq!((status, count(&resp)), (0, 2));
+    // Level 2 is fine when named; level 3 is not, even by ID.
+    assert_eq!(assert_with(&mut c, &[&cred2.id], None).0, 0);
+    assert_eq!(assert_with(&mut c, &[&cred3.id], None).0, 0x2E);
+    assert_eq!(assert_with(&mut c, &[&cred1.id], None).0, 0);
+
+    // The exclude list cannot reveal a level 3 credential without UV, so this
+    // registration succeeds (and replaces the old credential for user "three").
+    let params = make_credential_params("example.com", b"three", "u", true, &[&cred3.id]);
+    let (status, resp) = c.ctap2(0x01, Some(params));
+    assert_eq!(status, 0);
+    let cred3b = parse_make_credential("example.com", &resp);
+
+    // U2F has no UV, so level 3 credentials are unknown to it.
+    let app = sha256(b"example.com");
+    let (_, cred3c, _) = protected_credential(&mut c, b"three-c", 3, false, None);
+    let kh = cred3c.unwrap().id;
+    let mut apdu = vec![0, 2, 0x07, 0, (65 + kh.len()) as u8];
+    apdu.extend_from_slice(&[0; 32]);
+    apdu.extend_from_slice(&app);
+    apdu.push(kh.len() as u8);
+    apdu.extend_from_slice(&kh);
+    assert_eq!(c.u2f(&apdu).1, 0x6A80);
+    let kh2 = &cred2.id;
+    let mut apdu2 = vec![0, 2, 0x07, 0, (65 + kh2.len()) as u8];
+    apdu2.extend_from_slice(&[0; 32]);
+    apdu2.extend_from_slice(&app);
+    apdu2.push(kh2.len() as u8);
+    apdu2.extend_from_slice(kh2);
+    assert_eq!(c.u2f(&apdu2).1, 0x6985, "level 2 is known to U2F (key handle is named)");
+
+    // With UV everything is visible.
+    assert_eq!(c.set_pin(p, "1234"), 0);
+    let token = c.pin_token(p, "1234").unwrap();
+    let (status, resp) = assert_with(&mut c, &[], Some(&token));
+    assert_eq!((status, count(&resp)), (0, 5));
+    let (status, resp) = assert_with(&mut c, &[&cred3b.id], Some(&token));
+    assert_eq!(status, 0);
+    verify_assertion(&cred3b.key, &resp, &cdh);
+    let params = make_credential_params("example.com", b"x", "u", true, &[&cred3b.id]);
+    let (status, _) = c.ctap2(0x01, Some(with_pin_auth(params, (8, 9), p, &token, &[0x11; 32])));
+    assert_eq!(status, 0x19, "excluded once the user is verified");
 }

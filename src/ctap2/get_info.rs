@@ -1,7 +1,7 @@
 use ciborium::Value;
 
 use super::cbor::{bytes, int, map, text};
-use super::hmac_secret;
+use super::{cred_protect, hmac_secret};
 use super::pin_protocol::PinProtocol;
 use super::CmdResult;
 use crate::authenticator::{Authenticator, MAX_MSG_SIZE};
@@ -10,7 +10,7 @@ use crate::crypto::COSE_ALG_ES256;
 pub(super) fn handle(auth: &Authenticator) -> CmdResult {
     Ok(Some(map(vec![
         (int(0x01), Value::Array(vec![text("U2F_V2"), text("FIDO_2_0")])),
-        (int(0x02), Value::Array(vec![text(hmac_secret::NAME)])),
+        (int(0x02), Value::Array(vec![text(cred_protect::NAME), text(hmac_secret::NAME)])),
         (int(0x03), bytes(&auth.aaguid)),
         (
             int(0x04),

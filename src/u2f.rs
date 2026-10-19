@@ -10,7 +10,7 @@ use std::time::Duration;
 use crate::authenticator::{now_millis, Authenticator};
 use crate::crypto;
 use crate::presence::{CancelToken, Presence, PresenceKind, PresenceRequest};
-use crate::store::Credential;
+use crate::store::{CredProtect, Credential};
 
 pub const SW_NO_ERROR: u16 = 0x9000;
 pub const SW_WRONG_LENGTH: u16 = 0x6700;
@@ -113,6 +113,7 @@ fn register(auth: &mut Authenticator, data: &[u8]) -> Result<Vec<u8>, u16> {
             discoverable: false,
             created: now_millis(),
             hmac_secret: None,
+            cred_protect: CredProtect::UvOptional,
         })
         .map_err(internal)?;
     log::info!("registered U2F credential");
@@ -137,7 +138,8 @@ fn authenticate(auth: &mut Authenticator, mode: u8, data: &[u8]) -> Result<Vec<u
         .store
         .get(key_handle)
         .map_err(internal)?
-        .filter(|c| c.rp_id_hash == app)
+        // U2F cannot verify the user, so credProtect level 3 credentials look unknown.
+        .filter(|c| c.rp_id_hash == app && c.cred_protect.allows(false, true))
         .ok_or(SW_WRONG_DATA)?;
 
     let flags = match mode {

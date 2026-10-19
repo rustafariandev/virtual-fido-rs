@@ -15,7 +15,7 @@ import sys
 from fido2.attestation import Attestation
 from fido2.ctap import CtapError
 from fido2.ctap2 import ClientPin, Ctap2
-from fido2.ctap2.extensions import HmacSecretExtension
+from fido2.ctap2.extensions import CredProtectExtension, HmacSecretExtension
 from fido2.ctap2.pin import PinProtocolV1, PinProtocolV2
 from fido2.hid import CtapHidDevice
 from fido2.hid.base import CtapHidConnection, HidDescriptor
@@ -119,6 +119,35 @@ for proto_cls in (PinProtocolV1, PinProtocolV2):
 assert results[0] == results[1], results
 assert len(results[0]["output1"]) == 32 and results[0]["output1"] != results[0]["output2"]
 print("hmac-secret: create / get over PIN protocols 1 and 2 agree OK")
+
+# credProtect level 3: invisible without the PIN, usable with it.
+ctap.reset()
+assert "credProtect" in ctap.get_info().extensions
+level = CredProtectExtension(ctap).process_create_input(
+    {"credentialProtectionPolicy": CredProtectExtension.POLICY.REQUIRED}
+)
+assert level == 3
+proto = PinProtocolV2()
+pin = ClientPin(ctap, proto)
+pin.set_pin("hunter22")
+token = pin.get_pin_token("hunter22")
+cdh = hashlib.sha256(b"register").digest()
+att = ctap.make_credential(
+    cdh, rp, {"id": os.urandom(8), "name": "carol"}, key_params,
+    extensions={"credProtect": level}, options={"rk": True},
+    pin_uv_param=proto.authenticate(token, cdh), pin_uv_protocol=proto.VERSION,
+)
+assert att.auth_data.extensions == {"credProtect": 3}, att.auth_data.extensions
+cred = att.auth_data.credential_data
+cdh = hashlib.sha256(b"login").digest()
+allow = [{"type": "public-key", "id": cred.credential_id}]
+expect_error(CtapError.ERR.NO_CREDENTIALS, ctap.get_assertion, rp["id"], cdh, allow)
+expect_error(CtapError.ERR.NO_CREDENTIALS, ctap.get_assertion, rp["id"], cdh)
+assertion = ctap.get_assertion(
+    rp["id"], cdh, allow, pin_uv_param=proto.authenticate(token, cdh), pin_uv_protocol=proto.VERSION
+)
+assertion.verify(cdh, cred.public_key)
+print("credProtect: level 3 hidden without PIN, usable with PIN OK")
 
 dev.close()
 print("OK")

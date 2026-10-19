@@ -2,6 +2,7 @@
 
 pub mod cbor;
 mod client_pin;
+mod cred_protect;
 mod get_assertion;
 mod get_info;
 mod hmac_secret;
