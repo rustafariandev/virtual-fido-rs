@@ -6,10 +6,11 @@ anything else that talks to hardware keys will see it as a plugged-in key.
 
 Supported: CTAPHID transport (keepalive, cancel, multiple channels), CTAP2 `getInfo`,
 `makeCredential`, `getAssertion`, `getNextAssertion`, `reset`, `clientPIN`
-(PIN/UV auth protocols 1 and 2), resident (discoverable) keys, ES256 with packed
-self-attestation, and the CTAP1/U2F `REGISTER` / `AUTHENTICATE` / `VERSION` commands.
-Not supported yet: extensions (`hmac-secret`, `credProtect`, …), credential
-management, CTAP 2.1 permission-scoped PIN tokens.
+(PIN/UV auth protocols 1 and 2), the `hmac-secret` extension, resident (discoverable)
+keys, ES256 with packed self-attestation, and the CTAP1/U2F `REGISTER` /
+`AUTHENTICATE` / `VERSION` commands. Not supported yet: other extensions
+(`credProtect`, `largeBlob`, …), credential management, CTAP 2.1 permission-scoped
+PIN tokens.
 
 > **Security note.** This is a *software* key: private keys live in a file (or in
 > memory) on this machine, not in tamper-resistant hardware. Anyone who gets the
@@ -71,6 +72,16 @@ Once a PIN is set:
 
 Only a truncated SHA-256 of the PIN is stored, along with the retry counter, in the
 credential store. With `--store memory` the PIN disappears on exit like everything else.
+
+## hmac-secret
+
+Credentials created with the `hmac-secret` extension get two random 32-byte secrets,
+stored with the credential: one used when the request was PIN-verified, one when not.
+A client sends one or two 32-byte salts and gets back HMAC-SHA-256(secret, salt) for
+each. The outputs are stable for a given credential and salt, so they can serve as
+keys, for example with `systemd-cryptenroll --fido2-device=auto` for disk unlocking or
+the WebAuthn PRF extension in browsers. Back up the store file if you depend on them:
+losing the credential means losing the derived key.
 
 ## Try it
 

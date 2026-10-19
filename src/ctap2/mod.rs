@@ -4,6 +4,7 @@ pub mod cbor;
 mod client_pin;
 mod get_assertion;
 mod get_info;
+mod hmac_secret;
 mod make_credential;
 pub mod pin_protocol;
 
@@ -65,6 +66,7 @@ pub const CMD_GET_NEXT_ASSERTION: u8 = 0x08;
 pub(crate) const FLAG_UP: u8 = 0x01;
 pub(crate) const FLAG_UV: u8 = 0x04;
 pub(crate) const FLAG_AT: u8 = 0x40;
+pub(crate) const FLAG_ED: u8 = 0x80;
 
 type CmdResult = Result<Option<Value>, Status>;
 

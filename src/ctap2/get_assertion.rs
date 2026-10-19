@@ -4,7 +4,8 @@ use ciborium::Value;
 
 use super::cbor::{self, as_array, as_bool, as_bytes, as_map, as_text, bytes, get, get_text, int, map, require, text};
 use super::client_pin::verify_pin_uv_auth;
-use super::{CmdResult, Status, FLAG_UP, FLAG_UV};
+use super::hmac_secret;
+use super::{CmdResult, Status, FLAG_ED, FLAG_UP, FLAG_UV};
 use crate::authenticator::{Authenticator, RequestCtx};
 use crate::crypto;
 use crate::presence::{PresenceKind, PresenceRequest};
@@ -20,6 +21,7 @@ pub(crate) struct Pending {
     rp_id_hash: [u8; 32],
     client_data_hash: Vec<u8>,
     flags: u8,
+    hmac_secret: Option<hmac_secret::Request>,
     started: Instant,
 }
 
@@ -70,6 +72,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         },
     };
     let uv = verify_pin_uv_auth(auth, get(&m, 0x06), get(&m, 0x07), &client_data_hash, &presence, ctx)?;
+    let hmac_secret = hmac_secret::parse_request(auth, get(&m, 0x04))?;
     if creds.is_empty() {
         return Err(Status::NO_CREDENTIALS);
     }
@@ -86,6 +89,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         &rp_id_hash,
         &client_data_hash,
         flags,
+        hmac_secret.as_ref(),
         (discovering && total > 1).then_some(total),
     )?;
     if discovering && !creds.is_empty() {
@@ -95,6 +99,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
             rp_id_hash,
             client_data_hash,
             flags,
+            hmac_secret,
             started: Instant::now(),
         });
     }
@@ -108,7 +113,7 @@ pub(super) fn next(auth: &mut Authenticator, ctx: &RequestCtx) -> CmdResult {
         return Err(Status::NOT_ALLOWED);
     }
     let cred = p.credentials.remove(0);
-    let response = assertion(auth, &cred, &p.rp_id_hash, &p.client_data_hash, p.flags, None)?;
+    let response = assertion(auth, &cred, &p.rp_id_hash, &p.client_data_hash, p.flags, p.hmac_secret.as_ref(), None)?;
     if !p.credentials.is_empty() {
         auth.pending_assertions = Some(p);
     }
@@ -121,13 +126,18 @@ fn assertion(
     rp_id_hash: &[u8; 32],
     client_data_hash: &[u8],
     flags: u8,
+    hmac_secret: Option<&hmac_secret::Request>,
     number_of_credentials: Option<usize>,
 ) -> Result<Value, Status> {
+    let extensions = hmac_secret.and_then(|h| h.output(cred, flags & FLAG_UV != 0));
     let counter = auth.store.increment_counter(&cred.id)?;
     let mut auth_data = Vec::with_capacity(37);
     auth_data.extend_from_slice(rp_id_hash);
-    auth_data.push(flags);
+    auth_data.push(flags | if extensions.is_some() { FLAG_ED } else { 0 });
     auth_data.extend_from_slice(&counter.to_be_bytes());
+    if let Some(ext) = &extensions {
+        auth_data.extend(cbor::encode(ext));
+    }
     let signature = crypto::sign(&cred.private_key, &[auth_data.as_slice(), client_data_hash].concat())?;
 
     let mut entries = vec![

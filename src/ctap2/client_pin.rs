@@ -42,6 +42,11 @@ impl PinRuntime {
     pub(crate) fn reset(&mut self) {
         *self = PinRuntime::new();
     }
+
+    /// Shared secret with a platform's key-agreement key (a COSE_Key).
+    pub(super) fn shared_secret(&self, protocol: PinProtocol, peer: &Value) -> Result<Zeroizing<Vec<u8>>, Status> {
+        Ok(protocol.shared_secret(&self.key_agreement, &parse_cose_key(peer)?))
+    }
 }
 
 pub(super) fn handle(auth: &mut Authenticator, params: &[u8]) -> CmdResult {
@@ -66,8 +71,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8]) -> CmdResult {
 }
 
 fn shared_secret(auth: &Authenticator, protocol: PinProtocol, m: &[(Value, Value)]) -> Result<Zeroizing<Vec<u8>>, Status> {
-    let peer = parse_cose_key(require(get(m, 0x03))?)?;
-    Ok(protocol.shared_secret(&auth.pin.key_agreement, &peer))
+    auth.pin.shared_secret(protocol, require(get(m, 0x03))?)
 }
 
 fn set_pin(auth: &mut Authenticator, protocol: PinProtocol, m: &[(Value, Value)]) -> CmdResult {

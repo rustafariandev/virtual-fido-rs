@@ -577,3 +577,141 @@ fn pin_blocks_after_eight_failures_and_reset_clears_it() {
     assert_eq!(c.set_pin(p, "4321"), 0);
     assert!(c.pin_token(p, "4321").is_ok());
 }
+
+// ---- hmac-secret ------------------------------------------------------------------
+
+fn with_extensions(params: Value, key: i64, extensions: Value) -> Value {
+    let Value::Map(mut entries) = params else { unreachable!() };
+    entries.push((int(key), extensions));
+    map(entries)
+}
+
+/// Splits authenticatorData into (flags, extensions map if ED is set).
+fn auth_data_extensions(ad: &[u8]) -> (u8, Option<Value>) {
+    let flags = ad[32];
+    let mut rest = &ad[37..];
+    if flags & 0x40 != 0 {
+        let id_len = u16::from_be_bytes([ad[53], ad[54]]) as usize;
+        rest = &ad[55 + id_len..];
+        let _cose: Value = ciborium::de::from_reader(&mut rest).unwrap();
+    }
+    if flags & 0x80 == 0 {
+        assert!(rest.is_empty());
+        return (flags, None);
+    }
+    let ext: Value = ciborium::de::from_reader(&mut rest).unwrap();
+    assert!(rest.is_empty(), "trailing bytes after extensions");
+    (flags, Some(ext))
+}
+
+impl Client {
+    /// getAssertion with an hmac-secret request; returns (status, flags, decrypted outputs).
+    fn get_hmac_secret(
+        &mut self,
+        protocol: PinProtocol,
+        salts: &[u8],
+        pin_token: Option<&[u8]>,
+        tamper: bool,
+    ) -> (u8, u8, Option<Vec<u8>>) {
+        let (cose, secret) = self.key_agreement(protocol);
+        let salt_enc = protocol.encrypt(&secret, salts);
+        let mut salt_auth = protocol.authenticate_with_secret(&secret, &salt_enc);
+        if tamper {
+            salt_auth[0] ^= 1;
+        }
+        let ext = map(vec![(
+            text("hmac-secret"),
+            map(vec![(int(1), cose), (int(2), bytes(&salt_enc)), (int(3), bytes(&salt_auth)), (int(4), int(protocol.id()))]),
+        )]);
+        let cdh = [0x66; 32];
+        let mut params = with_extensions(get_assertion_params("example.com", &cdh, &[]), 4, ext);
+        if let Some(token) = pin_token {
+            params = with_pin_auth(params, (6, 7), protocol, token, &cdh);
+        }
+        let (status, resp) = self.ctap2(0x02, Some(params));
+        if status != 0 {
+            return (status, 0, None);
+        }
+        let (flags, ext) = auth_data_extensions(get(&resp, 2).unwrap().as_bytes().unwrap());
+        let out = ext.map(|e| {
+            let enc = get_text(e.as_map().unwrap(), "hmac-secret").unwrap().as_bytes().unwrap().clone();
+            protocol.decrypt(&secret, &enc).unwrap().to_vec()
+        });
+        (status, flags, out)
+    }
+}
+
+fn hmac_secret_credential(c: &mut Client, user: &[u8], pin_token: Option<(PinProtocol, &[u8])>) -> NewCredential {
+    let ext = map(vec![(text("hmac-secret"), Value::Bool(true))]);
+    let mut params = with_extensions(make_credential_params("example.com", user, "u", true, &[]), 6, ext);
+    if let Some((p, token)) = pin_token {
+        params = with_pin_auth(params, (8, 9), p, token, &[0x11; 32]);
+    }
+    let (status, resp) = c.ctap2(0x01, Some(params));
+    assert_eq!(status, 0);
+    let ad = get(&resp, 2).unwrap().as_bytes().unwrap();
+    let (flags, ext) = auth_data_extensions(ad);
+    assert_eq!(flags & 0x80, 0x80, "ED");
+    assert_eq!(ext, Some(map(vec![(text("hmac-secret"), Value::Bool(true))])));
+    parse_make_credential("example.com", &resp)
+}
+
+#[test]
+fn hmac_secret_outputs() {
+    for protocol in PinProtocol::SUPPORTED {
+        let mut c = Client::new(Arc::new(AutoPresence));
+        let (_, info) = c.ctap2(0x04, None);
+        assert_eq!(get(&info, 2), Some(&Value::Array(vec![text("hmac-secret")])));
+        hmac_secret_credential(&mut c, b"u1", None);
+
+        let salt1 = [1u8; 32];
+        let salt2 = [2u8; 32];
+        let (status, flags, out1) = c.get_hmac_secret(protocol, &salt1, None, false);
+        assert_eq!(status, 0);
+        assert_eq!(flags, 0x81, "UP | ED");
+        let out1 = out1.unwrap();
+        assert_eq!(out1.len(), 32);
+
+        // Deterministic per salt, and independent of the (fresh) shared secret.
+        assert_eq!(c.get_hmac_secret(protocol, &salt1, None, false).2.unwrap(), out1);
+        let both = c.get_hmac_secret(protocol, &[salt1, salt2].concat(), None, false).2.unwrap();
+        assert_eq!(both.len(), 64);
+        assert_eq!(&both[..32], &out1[..]);
+        assert_ne!(&both[32..], &out1[..]);
+
+        // With the PIN the credential's other secret is used.
+        assert_eq!(c.set_pin(protocol, "1234"), 0);
+        let token = c.pin_token(protocol, "1234").unwrap();
+        let (status, flags, out_uv) = c.get_hmac_secret(protocol, &salt1, Some(&token), false);
+        assert_eq!((status, flags), (0, 0x85), "UP | UV | ED");
+        assert_ne!(out_uv.unwrap(), out1);
+
+        assert_eq!(c.get_hmac_secret(protocol, &salt1, None, true).0, 0x33, "bad saltAuth");
+        assert_eq!(c.get_hmac_secret(protocol, &[0u8; 16], None, false).0, 0x03, "bad salt length");
+    }
+}
+
+#[test]
+fn hmac_secret_with_multiple_credentials() {
+    let p = PinProtocol::V2;
+    let mut c = Client::new(Arc::new(AutoPresence));
+    // A credential without the extension gets no output (and no ED flag).
+    c.ctap2(0x01, Some(make_credential_params("example.com", b"plain", "p", true, &[])));
+    std::thread::sleep(Duration::from_millis(2));
+    hmac_secret_credential(&mut c, b"secret", None);
+
+    let (cose, secret) = c.key_agreement(p);
+    let salt_enc = p.encrypt(&secret, &[7u8; 32]);
+    let salt_auth = p.authenticate_with_secret(&secret, &salt_enc);
+    let ext = map(vec![(text("hmac-secret"), map(vec![(int(1), cose), (int(2), bytes(&salt_enc)), (int(3), bytes(&salt_auth)), (int(4), int(2))]))]);
+    let (status, first) = c.ctap2(0x02, Some(with_extensions(get_assertion_params("example.com", &[0; 32], &[]), 4, ext)));
+    assert_eq!(status, 0);
+    let (flags, ext) = auth_data_extensions(get(&first, 2).unwrap().as_bytes().unwrap());
+    assert_eq!(flags, 0x81, "newest (hmac-secret) credential first");
+    let enc = get_text(ext.unwrap().as_map().unwrap(), "hmac-secret").unwrap().as_bytes().unwrap().clone();
+    assert_eq!(p.decrypt(&secret, &enc).unwrap().len(), 32);
+
+    let (status, second) = c.ctap2(0x08, None);
+    assert_eq!(status, 0);
+    assert_eq!(auth_data_extensions(get(&second, 2).unwrap().as_bytes().unwrap()), (0x01, None));
+}

@@ -1,6 +1,7 @@
 use super::cbor::{self, as_array, as_bool, as_bytes, as_int, as_map, as_text, bytes, get, get_text, int, map, require, text};
 use super::client_pin::verify_pin_uv_auth;
-use super::{CmdResult, Status, FLAG_AT, FLAG_UP, FLAG_UV};
+use super::hmac_secret;
+use super::{CmdResult, Status, FLAG_AT, FLAG_ED, FLAG_UP, FLAG_UV};
 use crate::authenticator::{now_millis, Authenticator, RequestCtx};
 use crate::crypto::{self, COSE_ALG_ES256};
 use crate::presence::{PresenceKind, PresenceRequest};
@@ -48,6 +49,8 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         }
     }
 
+    let hmac_secret = hmac_secret::requested_at_creation(get(&m, 0x06))?;
+
     let presence = PresenceRequest {
         kind: PresenceKind::Register,
         rp_id: Some(rp_id.clone()),
@@ -78,12 +81,15 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
 
     let mut auth_data = Vec::with_capacity(37 + 18 + id.len() + cose_key.len());
     auth_data.extend_from_slice(&rp_id_hash);
-    auth_data.push(FLAG_UP | FLAG_AT | if uv { FLAG_UV } else { 0 });
+    auth_data.push(FLAG_UP | FLAG_AT | if uv { FLAG_UV } else { 0 } | if hmac_secret { FLAG_ED } else { 0 });
     auth_data.extend_from_slice(&0u32.to_be_bytes());
     auth_data.extend_from_slice(&auth.aaguid);
     auth_data.extend_from_slice(&(id.len() as u16).to_be_bytes());
     auth_data.extend_from_slice(&id);
     auth_data.extend_from_slice(&cose_key);
+    if hmac_secret {
+        auth_data.extend(cbor::encode(&hmac_secret::creation_output()));
+    }
 
     // Packed self-attestation: signed by the new credential key itself.
     let signature = crypto::sign(&private_key, &[auth_data.as_slice(), client_data_hash].concat())?;
@@ -104,6 +110,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         sign_count: 0,
         discoverable: rk,
         created: now_millis(),
+        hmac_secret: hmac_secret.then(hmac_secret::new_cred_random),
     })?;
 
     Ok(Some(map(vec![

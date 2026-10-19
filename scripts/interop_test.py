@@ -15,6 +15,7 @@ import sys
 from fido2.attestation import Attestation
 from fido2.ctap import CtapError
 from fido2.ctap2 import ClientPin, Ctap2
+from fido2.ctap2.extensions import HmacSecretExtension
 from fido2.ctap2.pin import PinProtocolV1, PinProtocolV2
 from fido2.hid import CtapHidDevice
 from fido2.hid.base import CtapHidConnection, HidDescriptor
@@ -95,6 +96,29 @@ for proto_cls in (PinProtocolV1, PinProtocolV2):
     expect_error(CtapError.ERR.PIN_INVALID, pin.get_pin_token, "hunter22")
     pin.get_pin_token("correct horse")
     print(f"{name}: set / token / makeCredential+UV / getAssertion+UV / wrong PIN / change PIN OK")
+
+# hmac-secret: outputs depend only on the credential and salt, so both protocols agree.
+ctap.reset()
+assert "hmac-secret" in ctap.get_info().extensions
+user = {"id": os.urandom(8), "name": "bob"}
+cdh = hashlib.sha256(b"register").digest()
+create = HmacSecretExtension(ctap).process_create_input({"hmacCreateSecret": True})
+att = ctap.make_credential(cdh, rp, user, key_params, extensions={"hmac-secret": create}, options={"rk": True})
+assert HmacSecretExtension(ctap).process_create_output(att.auth_data) == {"hmacCreateSecret": True}
+cred = att.auth_data.credential_data
+
+salt1, salt2 = os.urandom(32), os.urandom(32)
+results = []
+for proto_cls in (PinProtocolV1, PinProtocolV2):
+    ext = HmacSecretExtension(ctap, proto_cls())
+    inp = ext.process_get_input({"hmacGetSecret": {"salt1": salt1, "salt2": salt2}})
+    cdh = hashlib.sha256(b"login").digest()
+    assertion = ctap.get_assertion(rp["id"], cdh, extensions={"hmac-secret": inp})
+    assertion.verify(cdh, cred.public_key)
+    results.append(ext.process_get_output(assertion.auth_data)["hmacGetSecret"])
+assert results[0] == results[1], results
+assert len(results[0]["output1"]) == 32 and results[0]["output1"] != results[0]["output2"]
+print("hmac-secret: create / get over PIN protocols 1 and 2 agree OK")
 
 dev.close()
 print("OK")

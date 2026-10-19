@@ -37,11 +37,18 @@ pub struct Credential {
     pub discoverable: bool,
     /// Creation time, milliseconds since the Unix epoch.
     pub created: u64,
+    /// hmac-secret keys, `CredRandomWithUV || CredRandomWithoutUV` (2 x 32 bytes), if the
+    /// credential was created with the extension. Absent in stores from older versions.
+    #[serde(default, with = "serde_bytes")]
+    pub hmac_secret: Option<Vec<u8>>,
 }
 
 impl Drop for Credential {
     fn drop(&mut self) {
         self.private_key.zeroize();
+        if let Some(s) = &mut self.hmac_secret {
+            s.zeroize();
+        }
     }
 }
 
