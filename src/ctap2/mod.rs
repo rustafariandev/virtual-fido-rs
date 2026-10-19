@@ -2,6 +2,7 @@
 
 pub mod cbor;
 mod client_pin;
+mod cred_mgmt;
 mod cred_protect;
 mod get_assertion;
 mod get_info;
@@ -15,6 +16,7 @@ use crate::authenticator::{Authenticator, RequestCtx};
 use crate::presence::{PresenceKind, PresenceRequest};
 
 pub(crate) use client_pin::PinRuntime;
+pub(crate) use cred_mgmt::Enumeration;
 pub(crate) use get_assertion::Pending;
 
 /// CTAP2 status code, the first byte of every response.
@@ -32,6 +34,7 @@ impl Status {
     pub const CREDENTIAL_EXCLUDED: Status = Status(0x19);
     pub const UNSUPPORTED_ALGORITHM: Status = Status(0x26);
     pub const OPERATION_DENIED: Status = Status(0x27);
+    pub const KEY_STORE_FULL: Status = Status(0x28);
     pub const UNSUPPORTED_OPTION: Status = Status(0x2B);
     pub const INVALID_OPTION: Status = Status(0x2C);
     pub const KEEPALIVE_CANCEL: Status = Status(0x2D);
@@ -62,6 +65,9 @@ pub const CMD_GET_INFO: u8 = 0x04;
 pub const CMD_CLIENT_PIN: u8 = 0x06;
 pub const CMD_RESET: u8 = 0x07;
 pub const CMD_GET_NEXT_ASSERTION: u8 = 0x08;
+pub const CMD_CREDENTIAL_MANAGEMENT: u8 = 0x0A;
+/// FIDO_2_1_PRE prototype of credential management.
+pub const CMD_CREDENTIAL_MANAGEMENT_PRE: u8 = 0x41;
 
 /// authenticatorData flags.
 pub(crate) const FLAG_UP: u8 = 0x01;
@@ -78,6 +84,9 @@ pub(crate) fn dispatch(auth: &mut Authenticator, req: &[u8], ctx: &RequestCtx) -
     if cmd != CMD_GET_NEXT_ASSERTION {
         auth.pending_assertions = None;
     }
+    if cmd != CMD_CREDENTIAL_MANAGEMENT && cmd != CMD_CREDENTIAL_MANAGEMENT_PRE {
+        auth.cred_mgmt = None;
+    }
     let result = match cmd {
         CMD_MAKE_CREDENTIAL => make_credential::handle(auth, params, ctx),
         CMD_GET_ASSERTION => get_assertion::handle(auth, params, ctx),
@@ -85,6 +94,7 @@ pub(crate) fn dispatch(auth: &mut Authenticator, req: &[u8], ctx: &RequestCtx) -
         CMD_CLIENT_PIN => client_pin::handle(auth, params),
         CMD_RESET => reset(auth, ctx),
         CMD_GET_NEXT_ASSERTION => get_assertion::next(auth, ctx),
+        CMD_CREDENTIAL_MANAGEMENT | CMD_CREDENTIAL_MANAGEMENT_PRE => cred_mgmt::handle(auth, params),
         _ => Err(Status::INVALID_COMMAND),
     };
     match result {

@@ -24,6 +24,9 @@ pub struct Credential {
     pub id: Vec<u8>,
     /// Relying party ID. Empty for credentials registered over U2F, which only know the hash.
     pub rp_id: String,
+    /// Relying party display name, if the RP gave one. Absent in older stores.
+    #[serde(default)]
+    pub rp_name: Option<String>,
     pub rp_id_hash: [u8; 32],
     #[serde(with = "serde_bytes")]
     pub user_id: Option<Vec<u8>>,
@@ -148,6 +151,10 @@ pub trait CredentialStore: Send {
     fn get(&self, id: &[u8]) -> Result<Option<Credential>>;
     /// All credentials for an RP, newest first.
     fn list_by_rp(&self, rp_id_hash: &[u8; 32]) -> Result<Vec<Credential>>;
+    /// Every stored credential.
+    fn list_all(&self) -> Result<Vec<Credential>>;
+    /// Deletes a credential; returns whether it existed.
+    fn delete(&mut self, id: &[u8]) -> Result<bool>;
     /// Increments and returns the credential's signature counter.
     fn increment_counter(&mut self, id: &[u8]) -> Result<u32>;
     /// Deletes all credentials and the PIN. Attestation material is kept.

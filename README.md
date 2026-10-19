@@ -5,12 +5,11 @@ through `/dev/uhid`, so browsers (WebAuthn), libfido2, `ssh-keygen -t ecdsa-sk` 
 anything else that talks to hardware keys will see it as a plugged-in key.
 
 Supported: CTAPHID transport (keepalive, cancel, multiple channels), CTAP2 `getInfo`,
-`makeCredential`, `getAssertion`, `getNextAssertion`, `reset`, `clientPIN`
+`makeCredential`, `getAssertion`, `getNextAssertion`, `reset`, `credentialManagement`, `clientPIN`
 (PIN/UV auth protocols 1 and 2), the `hmac-secret` and `credProtect` extensions,
 resident (discoverable) keys, ES256 with packed self-attestation, and the CTAP1/U2F
 `REGISTER` / `AUTHENTICATE` / `VERSION` commands. Not supported yet: other extensions
-(`largeBlob`, `credBlob`, …), credential management, CTAP 2.1 permission-scoped
-PIN tokens.
+(`largeBlob`, `credBlob`, …), CTAP 2.1 permission-scoped PIN tokens.
 
 > **Security note.** This is a *software* key: private keys live in a file (or in
 > memory) on this machine, not in tamper-resistant hardware. Anyone who gets the
@@ -99,6 +98,28 @@ OpenSSH asks for level 3 with `ssh-keygen -t ecdsa-sk -O verify-required`. Chrom
 asks for level 2 on discoverable credentials by default, so passkeys it creates only
 show up in username-less sign-in after you enter the PIN.
 
+## Credential management
+
+List, rename and delete resident credentials with any client that supports CTAP
+credential management, for example:
+
+```sh
+fido2-token -I -c /dev/hidrawN          # resident credential count
+fido2-token -L -r /dev/hidrawN          # list relying parties
+fido2-token -L -k example.com /dev/hidrawN
+fido2-token -D -i CREDENTIAL_ID /dev/hidrawN
+```
+
+or Chrome's *Settings → Privacy and security → Security → Manage security keys →
+Sign-in data*. All of these need the PIN. Up to 1000 resident credentials can be
+stored; beyond that, new ones are refused with `KEY_STORE_FULL` (re-registering an
+existing user replaces their credential and still works).
+
+Both the CTAP 2.1 command (`0x0A`) and the earlier `FIDO_2_1_PRE` prototype (`0x41`)
+are accepted. Requests are authorized with an ordinary PIN token, as on pre-2.1 keys,
+because CTAP 2.1 permission-scoped tokens aren't implemented: any client holding a
+current PIN token could also manage credentials.
+
 ## Try it
 
 ```sh
@@ -114,7 +135,8 @@ or register and sign in at <https://webauthn.io>.
 Storage and user presence are traits, picked by name at startup.
 
 - **Storage**: implement `store::CredentialStore` (`put`, `get`, `list_by_rp`,
-  `increment_counter`, `reset`, `attestation`, `set_attestation`, `pin`, `set_pin`) and
+  `list_all`, `delete`, `increment_counter`, `reset`, `attestation`, `set_attestation`,
+  `pin`, `set_pin`) and
   add a match arm in `store::open`. `set_pin` must be durable before it returns, since
   the PIN retry counter relies on it. `MemoryStore` (`src/store/memory.rs`) is the simplest example.
 - **Presence**: implement `presence::PresenceProvider::request`, which blocks until the

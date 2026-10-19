@@ -49,6 +49,7 @@ pub struct Authenticator {
     pub(crate) aaguid: [u8; 16],
     pub(crate) pending_assertions: Option<ctap2::Pending>,
     pub(crate) pin: ctap2::PinRuntime,
+    pub(crate) cred_mgmt: Option<ctap2::Enumeration>,
     pub(crate) u2f_presence: Option<u2f::PendingPresence>,
 }
 
@@ -60,6 +61,7 @@ impl Authenticator {
             aaguid,
             pending_assertions: None,
             pin: ctap2::PinRuntime::new(),
+            cred_mgmt: None,
             u2f_presence: None,
         }
     }

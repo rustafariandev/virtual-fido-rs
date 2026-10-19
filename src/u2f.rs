@@ -104,6 +104,7 @@ fn register(auth: &mut Authenticator, data: &[u8]) -> Result<Vec<u8>, u16> {
         .put(Credential {
             id: key_handle.clone(),
             rp_id: String::new(),
+            rp_name: None,
             rp_id_hash: app,
             user_id: None,
             user_name: None,

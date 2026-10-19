@@ -212,7 +212,7 @@ fn get_info_advertises_fido2_and_u2f() {
     let (status, info) = c.ctap2(0x04, None);
     assert_eq!(status, 0);
     let versions: Vec<_> = get(&info, 1).unwrap().as_array().unwrap().iter().map(|v| v.as_text().unwrap()).collect();
-    assert_eq!(versions, ["U2F_V2", "FIDO_2_0"]);
+    assert_eq!(versions, ["U2F_V2", "FIDO_2_0", "FIDO_2_1_PRE"]);
     assert_eq!(get(&info, 3).unwrap().as_bytes().unwrap(), &DEFAULT_AAGUID);
     let opts = get(&info, 4).unwrap().as_map().unwrap();
     assert_eq!(get_text(opts, "rk").unwrap().as_bool(), Some(true));
@@ -807,4 +807,134 @@ fn cred_protect_levels() {
     let params = make_credential_params("example.com", b"x", "u", true, &[&cred3b.id]);
     let (status, _) = c.ctap2(0x01, Some(with_pin_auth(params, (8, 9), p, &token, &[0x11; 32])));
     assert_eq!(status, 0x19, "excluded once the user is verified");
+}
+
+// ---- credential management --------------------------------------------------------
+
+impl Client {
+    /// credentialManagement request (command `cmd`: 0x0A or the 0x41 prototype),
+    /// authenticated with `token` unless it is None.
+    fn cred_mgmt(&mut self, cmd: u8, sub: i64, params: Option<Value>, token: Option<(PinProtocol, &[u8])>) -> (u8, Vec<(Value, Value)>) {
+        let mut entries = vec![(int(1), int(sub))];
+        let mut msg = vec![sub as u8];
+        if let Some(p) = params {
+            ciborium::ser::into_writer(&p, &mut msg).unwrap();
+            entries.push((int(2), p));
+        }
+        if let Some((protocol, token)) = token {
+            entries.push((int(3), int(protocol.id())));
+            entries.push((int(4), bytes(&protocol.authenticate(token, &msg))));
+        }
+        self.ctap2(cmd, Some(map(entries)))
+    }
+}
+
+fn credential_descriptor(id: &[u8]) -> Value {
+    map(vec![(text("id"), bytes(id)), (text("type"), text("public-key"))])
+}
+
+#[test]
+fn credential_management() {
+    let p = PinProtocol::V1;
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let (_, info) = c.ctap2(0x04, None);
+    let opts = get(&info, 4).unwrap().as_map().unwrap();
+    assert_eq!(get_text(opts, "credMgmt").unwrap().as_bool(), Some(true));
+
+    // Two RPs with resident keys, plus a non-resident credential that is never listed.
+    let rp_params = |rp: &str, user: &[u8], name: &str| make_credential_params(rp, user, name, true, &[]);
+    let (_, r) = c.ctap2(0x01, Some(rp_params("b.example", b"u1", "alice")));
+    let alice = parse_make_credential("b.example", &r);
+    std::thread::sleep(Duration::from_millis(2));
+    let (_, r) = c.ctap2(0x01, Some(rp_params("b.example", b"u2", "bob")));
+    let bob = parse_make_credential("b.example", &r);
+    c.ctap2(0x01, Some(rp_params("a.example", b"u3", "carol")));
+    c.ctap2(0x01, Some(make_credential_params("a.example", b"u4", "dave", false, &[])));
+
+    // Needs a PIN token.
+    assert_eq!(c.cred_mgmt(0x0A, 1, None, None).0, 0x36);
+    assert_eq!(c.set_pin(p, "1234"), 0);
+    let token = c.pin_token(p, "1234").unwrap();
+    let auth = Some((p, token.as_slice()));
+    assert_eq!(c.cred_mgmt(0x0A, 1, None, Some((p, &[0u8; 32]))).0, 0x33, "wrong token");
+
+    let (status, meta) = c.cred_mgmt(0x0A, 1, None, auth);
+    assert_eq!(status, 0);
+    assert_eq!(get(&meta, 1), Some(&int(3)));
+    assert_eq!(get(&meta, 2), Some(&int(997)));
+
+    // RPs come back sorted by ID; the prototype command works the same.
+    for cmd in [0x0A, 0x41] {
+        let (status, first) = c.cred_mgmt(cmd, 2, None, auth);
+        assert_eq!(status, 0);
+        assert_eq!(get(&first, 5), Some(&int(2)));
+        let rp = get(&first, 3).unwrap().as_map().unwrap();
+        assert_eq!(get_text(rp, "id"), Some(&text("a.example")));
+        assert_eq!(get_text(rp, "name"), Some(&text("a.example")));
+        assert_eq!(get(&first, 4).unwrap().as_bytes().unwrap(), &sha256(b"a.example"));
+        let (status, second) = c.cred_mgmt(cmd, 3, None, None);
+        assert_eq!(status, 0);
+        assert_eq!(get_text(get(&second, 3).unwrap().as_map().unwrap(), "id"), Some(&text("b.example")));
+        assert_eq!(c.cred_mgmt(cmd, 3, None, None).0, 0x30, "enumeration finished");
+    }
+
+    // Credentials for b.example, newest first, with matching public keys.
+    let rp_hash = map(vec![(int(1), bytes(&sha256(b"b.example")))]);
+    let (status, first) = c.cred_mgmt(0x0A, 4, Some(rp_hash.clone()), auth);
+    assert_eq!(status, 0);
+    assert_eq!(get(&first, 9), Some(&int(2)));
+    assert_eq!(get(&first, 7), Some(&credential_descriptor(&bob.id)));
+    let cose = get(&first, 8).unwrap().as_map().unwrap();
+    let x = get(cose, -2).unwrap().as_bytes().unwrap();
+    assert_eq!(&bob.key.to_encoded_point(false).as_bytes()[1..33], &x[..]);
+    assert_eq!(get(&first, 0x0A), Some(&int(1)), "credProtect level");
+    let (status, second) = c.cred_mgmt(0x0A, 5, None, None);
+    assert_eq!(status, 0);
+    assert_eq!(get(&second, 7), Some(&credential_descriptor(&alice.id)));
+    let user = get(&second, 6).unwrap().as_map().unwrap();
+    assert_eq!(get_text(user, "name"), Some(&text("alice")));
+    // Another command in between ends the enumeration.
+    c.cred_mgmt(0x0A, 4, Some(rp_hash.clone()), auth);
+    c.ctap2(0x04, None);
+    assert_eq!(c.cred_mgmt(0x0A, 5, None, None).0, 0x30);
+
+    // Rename alice: the new user entity replaces the old one.
+    let update = map(vec![
+        (int(2), credential_descriptor(&alice.id)),
+        (int(3), map(vec![(text("id"), bytes(b"u1")), (text("displayName"), text("Alice A."))])),
+    ]);
+    assert_eq!(c.cred_mgmt(0x0A, 7, Some(update), auth).0, 0);
+    let wrong_user = map(vec![(int(2), credential_descriptor(&alice.id)), (int(3), map(vec![(text("id"), bytes(b"zz"))]))]);
+    assert_eq!(c.cred_mgmt(0x0A, 7, Some(wrong_user), auth).0, 0x02);
+
+    // Delete bob; alice remains with her new name.
+    let delete = map(vec![(int(2), credential_descriptor(&bob.id))]);
+    assert_eq!(c.cred_mgmt(0x0A, 6, Some(delete.clone()), auth).0, 0);
+    assert_eq!(c.cred_mgmt(0x0A, 6, Some(delete), auth).0, 0x2E, "already gone");
+    let (status, only) = c.cred_mgmt(0x0A, 4, Some(rp_hash), auth);
+    assert_eq!(status, 0);
+    assert_eq!(get(&only, 9), Some(&int(1)));
+    let user = get(&only, 6).unwrap().as_map().unwrap();
+    assert_eq!(get_text(user, "displayName"), Some(&text("Alice A.")));
+    assert_eq!(get_text(user, "name"), None);
+    let cdh = [0; 32];
+    assert_eq!(c.ctap2(0x02, Some(get_assertion_params("b.example", &cdh, &[&bob.id]))).0, 0x2E);
+
+    let no_rp = map(vec![(int(1), bytes(&sha256(b"nobody.example")))]);
+    assert_eq!(c.cred_mgmt(0x0A, 4, Some(no_rp), auth).0, 0x2E);
+    assert_eq!(c.cred_mgmt(0x0A, 0x42, None, auth).0, 0x3E, "unknown subcommand");
+}
+
+#[test]
+fn resident_key_capacity() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    for i in 0..1000u32 {
+        let (status, _) = c.ctap2(0x01, Some(make_credential_params("example.com", &i.to_be_bytes(), "u", true, &[])));
+        assert_eq!(status, 0);
+    }
+    let full = make_credential_params("example.com", b"one more", "u", true, &[]);
+    assert_eq!(c.ctap2(0x01, Some(full)).0, 0x28, "KEY_STORE_FULL");
+    // Replacing an existing user's credential and non-resident credentials still work.
+    assert_eq!(c.ctap2(0x01, Some(make_credential_params("example.com", &7u32.to_be_bytes(), "u", true, &[]))).0, 0);
+    assert_eq!(c.ctap2(0x01, Some(make_credential_params("example.com", b"x", "u", false, &[]))).0, 0);
 }

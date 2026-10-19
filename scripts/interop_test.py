@@ -15,6 +15,7 @@ import sys
 from fido2.attestation import Attestation
 from fido2.ctap import CtapError
 from fido2.ctap2 import ClientPin, Ctap2
+from fido2.ctap2.credman import CredentialManagement
 from fido2.ctap2.extensions import CredProtectExtension, HmacSecretExtension
 from fido2.ctap2.pin import PinProtocolV1, PinProtocolV2
 from fido2.hid import CtapHidDevice
@@ -148,6 +149,38 @@ assertion = ctap.get_assertion(
 )
 assertion.verify(cdh, cred.public_key)
 print("credProtect: level 3 hidden without PIN, usable with PIN OK")
+
+# Credential management: list, rename and delete resident credentials.
+ctap.reset()
+proto = PinProtocolV2()
+pin = ClientPin(ctap, proto)
+pin.set_pin("hunter22")
+token = pin.get_pin_token("hunter22")
+created = {}
+for rp_id, user_name in [("b.example", "alice"), ("b.example", "bob"), ("a.example", "carol")]:
+    cdh = os.urandom(32)
+    att = ctap.make_credential(
+        cdh, {"id": rp_id, "name": rp_id.upper()}, {"id": user_name.encode(), "name": user_name}, key_params,
+        options={"rk": True}, pin_uv_param=proto.authenticate(token, cdh), pin_uv_protocol=proto.VERSION,
+    )
+    created[user_name] = att.auth_data.credential_data
+
+R = CredentialManagement.RESULT
+cm = CredentialManagement(ctap, proto, token)
+meta = cm.get_metadata()
+assert meta[R.EXISTING_CRED_COUNT] == 3, meta
+rps = cm.enumerate_rps()
+assert [rp[R.RP]["id"] for rp in rps] == ["a.example", "b.example"], rps
+assert rps[0][R.RP]["name"] == "A.EXAMPLE"
+creds = cm.enumerate_creds(rps[1][R.RP_ID_HASH])
+assert [c[R.USER]["name"] for c in creds] == ["bob", "alice"], creds
+for c in creds:
+    assert c[R.PUBLIC_KEY] == created[c[R.USER]["name"]].public_key
+cm.delete_cred(creds[0][R.CREDENTIAL_ID])
+remaining = cm.enumerate_creds(rps[1][R.RP_ID_HASH])
+assert [c[R.USER]["name"] for c in remaining] == ["alice"]
+assert cm.get_metadata()[R.EXISTING_CRED_COUNT] == 2
+print("credential management: metadata / enumerate RPs and credentials / delete OK")
 
 dev.close()
 print("OK")

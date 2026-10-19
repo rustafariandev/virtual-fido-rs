@@ -36,8 +36,18 @@ zeroize = "1"
 [dev-dependencies]
 tempfile = "3"
 
-# Key derivation is painfully slow unoptimised; keep debug builds and tests usable.
+# Key derivation and P-256 are painfully slow unoptimised; keep debug builds and tests usable.
 [profile.dev.package.argon2]
 opt-level = 3
 [profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.p256]
+opt-level = 3
+[profile.dev.package.primeorder]
+opt-level = 3
+[profile.dev.package.elliptic-curve]
+opt-level = 3
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+[profile.dev.package.ecdsa]
 opt-level = 3

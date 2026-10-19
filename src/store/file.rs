@@ -158,6 +158,14 @@ impl CredentialStore for FileStore {
         Ok(self.state.list_by_rp(rp_id_hash))
     }
 
+    fn list_all(&self) -> Result<Vec<Credential>> {
+        Ok(self.state.credentials.clone())
+    }
+
+    fn delete(&mut self, id: &[u8]) -> Result<bool> {
+        self.mutate(|s| Ok(s.delete(id)))
+    }
+
     fn increment_counter(&mut self, id: &[u8]) -> Result<u32> {
         self.mutate(|s| s.increment_counter(id))
     }

@@ -195,13 +195,19 @@ pub(super) fn verify_pin_uv_auth(
         auth.require_presence(presence, ctx)?;
         return Err(if pin_set { Status::PIN_INVALID } else { Status::PIN_NOT_SET });
     }
+    verify_pin_token(auth, protocol, client_data_hash, pin_auth)?;
+    Ok(true)
+}
+
+/// Checks that `pin_auth` is the current pinUvAuthToken's tag over `msg`.
+pub(super) fn verify_pin_token(auth: &Authenticator, protocol: Option<&Value>, msg: &[u8], pin_auth: &[u8]) -> Result<(), Status> {
     let protocol = PinProtocol::from_id(as_int(require(protocol)?)?).ok_or(Status::INVALID_PARAMETER)?;
-    if !pin_set {
+    if auth.store.pin()?.is_none() {
         return Err(Status::PIN_NOT_SET);
     }
     let token = auth.pin.token.as_ref().ok_or(Status::PIN_AUTH_INVALID)?;
-    if !protocol.verify(&**token, client_data_hash, pin_auth) {
+    if !protocol.verify(&**token, msg, pin_auth) {
         return Err(Status::PIN_AUTH_INVALID);
     }
-    Ok(true)
+    Ok(())
 }

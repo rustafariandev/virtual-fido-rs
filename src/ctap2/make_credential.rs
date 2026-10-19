@@ -1,6 +1,6 @@
 use super::cbor::{self, as_array, as_bool, as_bytes, as_int, as_map, as_text, bytes, get, get_text, int, map, require, text};
 use super::client_pin::verify_pin_uv_auth;
-use super::{cred_protect, hmac_secret};
+use super::{cred_mgmt, cred_protect, hmac_secret};
 use super::{CmdResult, Status, FLAG_AT, FLAG_ED, FLAG_UP, FLAG_UV};
 use crate::authenticator::{now_millis, Authenticator, RequestCtx};
 use crate::crypto::{self, COSE_ALG_ES256};
@@ -18,6 +18,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
     }
     let rp = as_map(require(get(&m, 0x02))?)?;
     let rp_id = as_text(require(get_text(rp, "id"))?)?.to_owned();
+    let rp_name = cbor::opt_text(rp, "name")?;
     let user = as_map(require(get(&m, 0x03))?)?;
     let user_id = as_bytes(require(get_text(user, "id"))?)?.to_vec();
     if user_id.len() > MAX_USER_ID_LEN {
@@ -75,6 +76,18 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         }
     }
 
+    if rk && cred_mgmt::resident_count(auth)? >= cred_mgmt::MAX_RESIDENT_CREDENTIALS {
+        // Re-registering an existing user replaces their credential, so has room.
+        let replaces = auth
+            .store
+            .list_by_rp(&rp_id_hash)?
+            .iter()
+            .any(|c| c.discoverable && c.user_id.as_deref() == Some(user_id.as_slice()));
+        if !replaces {
+            return Err(Status::KEY_STORE_FULL);
+        }
+    }
+
     auth.require_presence(&presence, ctx)?;
 
     let private_key = crypto::generate_private_key();
@@ -113,6 +126,7 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
     auth.store.put(Credential {
         id,
         rp_id,
+        rp_name,
         rp_id_hash,
         user_id: Some(user_id),
         user_name,

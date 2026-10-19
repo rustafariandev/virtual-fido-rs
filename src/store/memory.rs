@@ -39,6 +39,12 @@ impl StoreState {
         out
     }
 
+    pub fn delete(&mut self, id: &[u8]) -> bool {
+        let before = self.credentials.len();
+        self.credentials.retain(|c| c.id != id);
+        self.credentials.len() != before
+    }
+
     pub fn reset(&mut self) {
         self.credentials.clear();
         self.pin = None;
@@ -73,6 +79,14 @@ impl CredentialStore for MemoryStore {
 
     fn list_by_rp(&self, rp_id_hash: &[u8; 32]) -> Result<Vec<Credential>> {
         Ok(self.state.list_by_rp(rp_id_hash))
+    }
+
+    fn list_all(&self) -> Result<Vec<Credential>> {
+        Ok(self.state.credentials.clone())
+    }
+
+    fn delete(&mut self, id: &[u8]) -> Result<bool> {
+        Ok(self.state.delete(id))
     }
 
     fn increment_counter(&mut self, id: &[u8]) -> Result<u32> {
