@@ -1,0 +1,9 @@
+# Let members of the "fido" group create virtual HID devices, so virtual-fido can run
+# without sudo. Note: /dev/uhid access lets a user create *any* HID device (keyboards
+# included), so only add trusted users to this group.
+#
+#   sudo groupadd --system fido
+#   sudo usermod -aG fido "$USER"          # then log out and back in
+#   sudo cp udev/70-virtual-fido.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger /dev/uhid
+KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="fido", MODE="0660"

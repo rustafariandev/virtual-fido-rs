@@ -1,0 +1,147 @@
+//! Credential storage plugins.
+//!
+//! A backend implements [`CredentialStore`]; [`open`] picks one by name. To add a
+//! backend, write a module implementing the trait and add a match arm in [`open`].
+
+mod file;
+mod memory;
+
+use std::fmt;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::error::{Error, Result};
+
+pub use file::{FileStore, KdfParams};
+pub use memory::{MemoryStore, StoreState};
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Credential {
+    /// Random credential ID; doubles as the U2F key handle.
+    #[serde(with = "serde_bytes")]
+    pub id: Vec<u8>,
+    /// Relying party ID. Empty for credentials registered over U2F, which only know the hash.
+    pub rp_id: String,
+    pub rp_id_hash: [u8; 32],
+    #[serde(with = "serde_bytes")]
+    pub user_id: Option<Vec<u8>>,
+    pub user_name: Option<String>,
+    pub user_display_name: Option<String>,
+    /// Raw 32-byte P-256 private scalar.
+    #[serde(with = "serde_bytes")]
+    pub private_key: Vec<u8>,
+    pub sign_count: u32,
+    /// Resident key: discoverable by getAssertion without an allow list.
+    pub discoverable: bool,
+    /// Creation time, milliseconds since the Unix epoch.
+    pub created: u64,
+}
+
+impl Drop for Credential {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+    }
+}
+
+impl fmt::Debug for Credential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Credential")
+            .field("id", &self.id)
+            .field("rp_id", &self.rp_id)
+            .field("user_name", &self.user_name)
+            .field("sign_count", &self.sign_count)
+            .field("discoverable", &self.discoverable)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Batch attestation key and its self-signed certificate (DER).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AttestationMaterial {
+    #[serde(with = "serde_bytes")]
+    pub private_key: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub certificate: Vec<u8>,
+}
+
+impl Drop for AttestationMaterial {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+    }
+}
+
+pub trait CredentialStore: Send {
+    /// Stores a credential. A discoverable credential replaces any existing discoverable
+    /// credential for the same RP and user ID.
+    fn put(&mut self, cred: Credential) -> Result<()>;
+    fn get(&self, id: &[u8]) -> Result<Option<Credential>>;
+    /// All credentials for an RP, newest first.
+    fn list_by_rp(&self, rp_id_hash: &[u8; 32]) -> Result<Vec<Credential>>;
+    /// Increments and returns the credential's signature counter.
+    fn increment_counter(&mut self, id: &[u8]) -> Result<u32>;
+    /// Deletes all credentials. Attestation material is kept.
+    fn reset(&mut self) -> Result<()>;
+    fn attestation(&self) -> Result<Option<AttestationMaterial>>;
+    fn set_attestation(&mut self, attestation: AttestationMaterial) -> Result<()>;
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct StoreOptions {
+    pub path: Option<PathBuf>,
+    pub passphrase_file: Option<PathBuf>,
+}
+
+pub const BACKENDS: &[&str] = &["memory", "file"];
+
+pub fn open(name: &str, opts: &StoreOptions) -> Result<Box<dyn CredentialStore>> {
+    match name {
+        "memory" => Ok(Box::new(MemoryStore::default())),
+        "file" => {
+            let path = match &opts.path {
+                Some(p) => p.clone(),
+                None => default_store_path()?,
+            };
+            let passphrase = read_passphrase(opts, !path.exists())?;
+            log::info!("using credential store {}", path.display());
+            Ok(Box::new(FileStore::open(&path, &passphrase)?))
+        }
+        other => Err(Error::Config(format!(
+            "unknown store backend {other:?} (available: {})",
+            BACKENDS.join(", ")
+        ))),
+    }
+}
+
+fn default_store_path() -> Result<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .ok_or_else(|| Error::Config("cannot determine data directory; pass --store-path".into()))?;
+    Ok(base.join("virtual-fido").join("store.bin"))
+}
+
+/// Passphrase from `--passphrase-file`, then `$VFIDO_PASSPHRASE`, then an interactive prompt.
+fn read_passphrase(opts: &StoreOptions, creating: bool) -> Result<Zeroizing<String>> {
+    if let Some(path) = &opts.passphrase_file {
+        let mut s = Zeroizing::new(std::fs::read_to_string(path)?);
+        let trimmed = s.trim_end_matches(['\r', '\n']).len();
+        s.truncate(trimmed);
+        return Ok(s);
+    }
+    if let Ok(s) = std::env::var("VFIDO_PASSPHRASE") {
+        return Ok(Zeroizing::new(s));
+    }
+    let pass = Zeroizing::new(rpassword::prompt_password("Credential store passphrase: ")?);
+    if creating {
+        let confirm = Zeroizing::new(rpassword::prompt_password("Confirm new passphrase: ")?);
+        if *pass != *confirm {
+            return Err(Error::Config("passphrases do not match".into()));
+        }
+    }
+    if pass.is_empty() {
+        return Err(Error::Config("empty passphrase".into()));
+    }
+    Ok(pass)
+}

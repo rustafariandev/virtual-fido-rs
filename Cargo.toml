@@ -1,0 +1,39 @@
+[package]
+name = "virtual-fido"
+version = "0.1.0"
+edition = "2021"
+description = "A virtual FIDO2 / U2F security key for Linux, exposed through /dev/uhid"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["notify"]
+# Desktop-notification presence provider (D-Bus).
+notify = ["dep:notify-rust"]
+
+[dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
+argon2 = "0.5"
+ciborium = "0.2"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+notify-rust = { version = "4", optional = true }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+rand = "0.8"
+rcgen = "0.13"
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+sha2 = "0.10"
+thiserror = "2"
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+# Key derivation is painfully slow unoptimised; keep debug builds and tests usable.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
