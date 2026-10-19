@@ -14,7 +14,7 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use zeroize::Zeroizing;
 
-use super::{AttestationMaterial, Credential, CredentialStore, PinState, StoreState};
+use super::{AttestationMaterial, AuthenticatorConfig, Credential, CredentialStore, PinState, StoreState};
 use crate::crypto::random_bytes;
 use crate::error::{Error, Result};
 
@@ -206,6 +206,17 @@ impl CredentialStore for FileStore {
     fn set_large_blob(&mut self, data: Vec<u8>) -> Result<()> {
         self.mutate(|s| {
             s.large_blob = Some(data);
+            Ok(())
+        })
+    }
+
+    fn config(&self) -> Result<AuthenticatorConfig> {
+        Ok(self.state.config.clone())
+    }
+
+    fn set_config(&mut self, config: AuthenticatorConfig) -> Result<()> {
+        self.mutate(|s| {
+            s.config = config;
             Ok(())
         })
     }

@@ -156,6 +156,33 @@ pub struct PinState {
     pub pin_hash: [u8; 16],
     /// Wrong guesses left before the PIN is blocked until reset.
     pub retries: u8,
+    /// Length in Unicode code points, to check against a raised minimum. Unknown for
+    /// PINs set before this was recorded.
+    #[serde(default)]
+    pub code_points: Option<u8>,
+    /// Set by authenticatorConfig: the PIN must be changed before it can be used.
+    #[serde(default)]
+    pub force_change: bool,
+}
+
+/// Default minimum PIN length, in code points.
+pub const DEFAULT_MIN_PIN_LENGTH: u8 = 4;
+
+/// Settings changed with authenticatorConfig. Reset restores the defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthenticatorConfig {
+    /// Minimum PIN length in code points; it can only be raised.
+    pub min_pin_length: u8,
+    /// RPs allowed to learn `min_pin_length` through the minPinLength extension.
+    pub min_pin_length_rp_ids: Vec<String>,
+    /// Require user verification for every makeCredential / getAssertion, and disable U2F.
+    pub always_uv: bool,
+}
+
+impl Default for AuthenticatorConfig {
+    fn default() -> Self {
+        AuthenticatorConfig { min_pin_length: DEFAULT_MIN_PIN_LENGTH, min_pin_length_rp_ids: Vec::new(), always_uv: false }
+    }
 }
 
 pub trait CredentialStore: Send {
@@ -171,8 +198,8 @@ pub trait CredentialStore: Send {
     fn delete(&mut self, id: &[u8]) -> Result<bool>;
     /// Increments and returns the credential's signature counter.
     fn increment_counter(&mut self, id: &[u8]) -> Result<u32>;
-    /// Deletes all credentials, the PIN and the large-blob array. Attestation
-    /// material is kept.
+    /// Deletes all credentials, the PIN and the large-blob array, and restores the
+    /// default configuration. Attestation material is kept.
     fn reset(&mut self) -> Result<()>;
     fn attestation(&self) -> Result<Option<AttestationMaterial>>;
     fn set_attestation(&mut self, attestation: AttestationMaterial) -> Result<()>;
@@ -183,6 +210,8 @@ pub trait CredentialStore: Send {
     /// The serialized large-blob array (CBOR array || truncated hash); `None` if never written.
     fn large_blob(&self) -> Result<Option<Vec<u8>>>;
     fn set_large_blob(&mut self, data: Vec<u8>) -> Result<()>;
+    fn config(&self) -> Result<AuthenticatorConfig>;
+    fn set_config(&mut self, config: AuthenticatorConfig) -> Result<()>;
 }
 
 #[derive(Debug, Default, Clone)]

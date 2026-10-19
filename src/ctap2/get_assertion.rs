@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use ciborium::Value;
 
 use super::cbor::{self, as_array, as_bool, as_bytes, as_map, as_text, bytes, get, get_text, int, map, require, text};
-use super::client_pin::verify_pin_uv_auth;
+use super::client_pin::{verify_pin_uv_auth, PERM_GET_ASSERTION};
 use super::{cred_blob, hmac_secret, large_blobs};
 use super::{CmdResult, Status, FLAG_ED, FLAG_UP, FLAG_UV};
 use crate::authenticator::{Authenticator, RequestCtx};
@@ -45,7 +45,8 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         for (k, v) in as_map(opts)? {
             match as_text(k)? {
                 "up" => up = as_bool(v)?,
-                "uv" if as_bool(v)? => return Err(Status::UNSUPPORTED_OPTION),
+                // No built-in user verification: only the PIN (pinUvAuthParam) verifies.
+                "uv" if as_bool(v)? => return Err(Status::INVALID_OPTION),
                 "rk" => return Err(Status::UNSUPPORTED_OPTION),
                 _ => {}
             }
@@ -54,7 +55,19 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
 
     // User verification comes first: credProtect decides which credentials are visible.
     let mut presence = PresenceRequest { kind: PresenceKind::Authenticate, rp_id: Some(rp_id.clone()), user: None };
-    let uv = verify_pin_uv_auth(auth, get(&m, 0x06), get(&m, 0x07), &client_data_hash, &presence, ctx)?;
+    let uv = verify_pin_uv_auth(
+        auth,
+        get(&m, 0x06),
+        get(&m, 0x07),
+        &client_data_hash,
+        PERM_GET_ASSERTION,
+        &rp_id,
+        &presence,
+        ctx,
+    )?;
+    if !uv && auth.store.config()?.always_uv {
+        return Err(if auth.store.pin()?.is_some() { Status::PIN_REQUIRED } else { Status::PIN_NOT_SET });
+    }
     let extensions = Extensions {
         hmac_secret: hmac_secret::parse_request(auth, get(&m, 0x04))?,
         large_blob_key: large_blobs::requested(get(&m, 0x04))?,
@@ -116,6 +129,9 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
             extensions,
             started: Instant::now(),
         });
+    }
+    if uv {
+        auth.pin.consume_mc_ga_permissions();
     }
     log::info!("signed assertion for {rp_id}");
     Ok(Some(response))

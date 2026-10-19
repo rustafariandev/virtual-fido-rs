@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{AttestationMaterial, Credential, CredentialStore, PinState};
+use super::{AttestationMaterial, AuthenticatorConfig, Credential, CredentialStore, PinState};
 use crate::error::{Error, Result};
 
 /// Complete store contents. Shared by the memory backend and the file backend,
@@ -15,6 +15,9 @@ pub struct StoreState {
     /// Absent in stores written before largeBlob support.
     #[serde(default, with = "serde_bytes")]
     pub large_blob: Option<Vec<u8>>,
+    /// Absent in stores written before authenticatorConfig support.
+    #[serde(default)]
+    pub config: AuthenticatorConfig,
 }
 
 impl StoreState {
@@ -52,6 +55,7 @@ impl StoreState {
         self.credentials.clear();
         self.pin = None;
         self.large_blob = None;
+        self.config = AuthenticatorConfig::default();
     }
 
     pub fn increment_counter(&mut self, id: &[u8]) -> Result<u32> {
@@ -126,6 +130,15 @@ impl CredentialStore for MemoryStore {
 
     fn set_large_blob(&mut self, data: Vec<u8>) -> Result<()> {
         self.state.large_blob = Some(data);
+        Ok(())
+    }
+
+    fn config(&self) -> Result<AuthenticatorConfig> {
+        Ok(self.state.config.clone())
+    }
+
+    fn set_config(&mut self, config: AuthenticatorConfig) -> Result<()> {
+        self.state.config = config;
         Ok(())
     }
 }

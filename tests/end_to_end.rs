@@ -212,7 +212,7 @@ fn get_info_advertises_fido2_and_u2f() {
     let (status, info) = c.ctap2(0x04, None);
     assert_eq!(status, 0);
     let versions: Vec<_> = get(&info, 1).unwrap().as_array().unwrap().iter().map(|v| v.as_text().unwrap()).collect();
-    assert_eq!(versions, ["U2F_V2", "FIDO_2_0", "FIDO_2_1_PRE"]);
+    assert_eq!(versions, ["U2F_V2", "FIDO_2_0", "FIDO_2_1_PRE", "FIDO_2_1"]);
     assert_eq!(get(&info, 3).unwrap().as_bytes().unwrap(), &DEFAULT_AAGUID);
     let opts = get(&info, 4).unwrap().as_map().unwrap();
     assert_eq!(get_text(opts, "rk").unwrap().as_bool(), Some(true));
@@ -292,7 +292,7 @@ fn rejects_unsupported_algorithms_and_uv() {
     ]);
     assert_eq!(c.ctap2(0x01, Some(params)).0, 0x26, "ES384 is not supported");
     let params = map(vec![(int(1), text("example.com")), (int(2), bytes(&[0; 32])), (int(5), map(vec![(text("uv"), Value::Bool(true))]))]);
-    assert_eq!(c.ctap2(0x02, Some(params)).0, 0x2B);
+    assert_eq!(c.ctap2(0x02, Some(params)).0, 0x2C, "no built-in UV");
     assert_eq!(c.ctap2(0x42, None).0, 0x01);
 }
 
@@ -458,6 +458,22 @@ impl Client {
         Ok(protocol.decrypt(&secret, enc).unwrap().to_vec())
     }
 
+    /// getPinUvAuthTokenUsingPinWithPermissions (CTAP 2.1).
+    fn pin_token_with(&mut self, protocol: PinProtocol, pin: &str, permissions: u8, rp_id: Option<&str>) -> Result<Vec<u8>, u8> {
+        let (cose, secret) = self.key_agreement(protocol);
+        let pin_hash_enc = protocol.encrypt(&secret, &sha256(pin.as_bytes())[..16]);
+        let mut entries = vec![(int(3), cose), (int(6), bytes(&pin_hash_enc)), (int(9), int(permissions.into()))];
+        if let Some(rp) = rp_id {
+            entries.push((int(0x0A), text(rp)));
+        }
+        let (status, resp) = self.client_pin(protocol, 9, entries);
+        if status != 0 {
+            return Err(status);
+        }
+        let enc = get(&resp, 2).unwrap().as_bytes().unwrap();
+        Ok(protocol.decrypt(&secret, enc).unwrap().to_vec())
+    }
+
     fn pin_retries(&mut self) -> i128 {
         let (status, resp) = self.client_pin(PinProtocol::V1, 1, vec![]);
         assert_eq!(status, 0);
@@ -510,7 +526,9 @@ fn pin_set_use_and_change() {
         let (status, _) = c.ctap2(0x01, Some(with_pin_auth(params, (8, 9), protocol, &token, &[0x99; 32])));
         assert_eq!(status, 0x33, "pinUvAuthParam over the wrong hash");
 
-        // getAssertion works with or without the PIN; UV reflects which.
+        // getAssertion works with or without the PIN; UV reflects which. The
+        // makeCredential used up the old token's mc / ga permissions.
+        let token = c.pin_token(protocol, "1234").unwrap();
         let cdh = [0x55; 32];
         let (status, resp) = c.ctap2(0x02, Some(get_assertion_params("example.com", &cdh, &[])));
         assert_eq!(status, 0);
@@ -663,7 +681,13 @@ fn hmac_secret_outputs() {
         let (_, info) = c.ctap2(0x04, None);
         assert_eq!(
             get(&info, 2),
-            Some(&Value::Array(vec![text("credBlob"), text("credProtect"), text("hmac-secret"), text("largeBlobKey")]))
+            Some(&Value::Array(vec![
+                text("credBlob"),
+                text("credProtect"),
+                text("hmac-secret"),
+                text("largeBlobKey"),
+                text("minPinLength")
+            ]))
         );
         hmac_secret_credential(&mut c, b"u1", None);
 
@@ -804,9 +828,11 @@ fn cred_protect_levels() {
     let token = c.pin_token(p, "1234").unwrap();
     let (status, resp) = assert_with(&mut c, &[], Some(&token));
     assert_eq!((status, count(&resp)), (0, 5));
+    let token = c.pin_token(p, "1234").unwrap();
     let (status, resp) = assert_with(&mut c, &[&cred3b.id], Some(&token));
     assert_eq!(status, 0);
     verify_assertion(&cred3b.key, &resp, &cdh);
+    let token = c.pin_token(p, "1234").unwrap();
     let params = make_credential_params("example.com", b"x", "u", true, &[&cred3b.id]);
     let (status, _) = c.ctap2(0x01, Some(with_pin_auth(params, (8, 9), p, &token, &[0x11; 32])));
     assert_eq!(status, 0x19, "excluded once the user is verified");
@@ -857,7 +883,9 @@ fn credential_management() {
     // Needs a PIN token.
     assert_eq!(c.cred_mgmt(0x0A, 1, None, None).0, 0x36);
     assert_eq!(c.set_pin(p, "1234"), 0);
-    let token = c.pin_token(p, "1234").unwrap();
+    let legacy = c.pin_token(p, "1234").unwrap();
+    assert_eq!(c.cred_mgmt(0x0A, 1, None, Some((p, &legacy))).0, 0x33, "getPinToken tokens lack the cm permission");
+    let token = c.pin_token_with(p, "1234", 0x04, None).unwrap();
     let auth = Some((p, token.as_slice()));
     assert_eq!(c.cred_mgmt(0x0A, 1, None, Some((p, &[0u8; 32]))).0, 0x33, "wrong token");
 
@@ -1036,7 +1064,9 @@ fn large_blob_array_reads_and_writes() {
     let p = PinProtocol::V2;
     assert_eq!(c.set_pin(p, "1234"), 0);
     assert_eq!(c.blob_write_all(&next, None), 0x36);
-    let token = c.pin_token(p, "1234").unwrap();
+    let legacy = c.pin_token(p, "1234").unwrap();
+    assert_eq!(c.blob_write_all(&next, Some((p, &legacy))), 0x33, "getPinToken tokens lack the lbw permission");
+    let token = c.pin_token_with(p, "1234", 0x10, None).unwrap();
     assert_eq!(c.blob_write_all(&next, Some((p, &[0u8; 32]))), 0x33);
     assert_eq!(c.blob_write_all(&next, Some((p, &token))), 0);
     assert_eq!(c.blob_read_all(), next);
@@ -1071,7 +1101,7 @@ fn large_blob_keys() {
     // Credential management shows it too.
     let p = PinProtocol::V1;
     assert_eq!(c.set_pin(p, "1234"), 0);
-    let token = c.pin_token(p, "1234").unwrap();
+    let token = c.pin_token_with(p, "1234", 0x04, None).unwrap();
     let rp_hash = map(vec![(int(1), bytes(&sha256(b"example.com")))]);
     let (status, listed) = c.cred_mgmt(0x0A, 4, Some(rp_hash), Some((p, &token)));
     assert_eq!(status, 0);
@@ -1198,10 +1228,218 @@ fn ed25519_credentials() {
     // Credential management reports the Ed25519 COSE key.
     let p = PinProtocol::V2;
     assert_eq!(c.set_pin(p, "1234"), 0);
-    let token = c.pin_token(p, "1234").unwrap();
+    let token = c.pin_token_with(p, "1234", 0x04, None).unwrap();
     let (_, listed) = c.cred_mgmt(0x0A, 4, Some(map(vec![(int(1), bytes(&app))])), Some((p, &token)));
     let (_, next) = c.cred_mgmt(0x0A, 5, None, None);
     let ed_entry = if get(&listed, 7) == Some(&credential_descriptor(&id)) { listed } else { next };
     let cose = get(&ed_entry, 8).unwrap().as_map().unwrap();
     assert_eq!(get(cose, -2).unwrap().as_bytes().unwrap(), key.as_bytes());
+}
+
+// ---- CTAP 2.1 ---------------------------------------------------------------------
+
+const PERM_MC: u8 = 0x01;
+const PERM_GA: u8 = 0x02;
+const PERM_CM: u8 = 0x04;
+const PERM_LBW: u8 = 0x10;
+const PERM_ACFG: u8 = 0x20;
+
+impl Client {
+    /// authenticatorConfig request, authenticated with `token` unless None.
+    fn config(&mut self, sub: u8, params: Option<Value>, token: Option<(PinProtocol, &[u8])>) -> u8 {
+        let mut entries = vec![(int(1), int(sub.into()))];
+        let mut msg = [&[0xffu8; 32][..], &[0x0d, sub]].concat();
+        if let Some(p) = params {
+            ciborium::ser::into_writer(&p, &mut msg).unwrap();
+            entries.push((int(2), p));
+        }
+        if let Some((protocol, token)) = token {
+            entries.push((int(3), int(protocol.id())));
+            entries.push((int(4), bytes(&protocol.authenticate(token, &msg))));
+        }
+        self.ctap2(0x0D, Some(map(entries))).0
+    }
+
+    fn info(&mut self) -> Vec<(Value, Value)> {
+        self.ctap2(0x04, None).1
+    }
+}
+
+fn info_option(info: &[(Value, Value)], name: &str) -> Option<bool> {
+    get_text(get(info, 4).unwrap().as_map().unwrap(), name).and_then(Value::as_bool)
+}
+
+#[test]
+fn ctap21_get_info() {
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let info = c.info();
+    for opt in ["pinUvAuthToken", "makeCredUvNotRqd", "authnrCfg", "setMinPINLength", "credMgmt", "largeBlobs"] {
+        assert_eq!(info_option(&info, opt), Some(true), "{opt}");
+    }
+    assert_eq!(info_option(&info, "alwaysUv"), Some(false));
+    assert_eq!(get(&info, 0x0C), Some(&Value::Bool(false)), "forcePINChange");
+    assert_eq!(get(&info, 0x0D), Some(&int(4)), "minPINLength");
+    assert_eq!(get(&info, 0x0E), Some(&int(100)), "firmwareVersion 0.1.0");
+    assert_eq!(get(&info, 0x14), Some(&int(1000)), "remainingDiscoverableCredentials");
+}
+
+#[test]
+fn ctap21_token_permissions_and_rp_binding() {
+    let p = PinProtocol::V2;
+    let mut c = Client::new(Arc::new(AutoPresence));
+    assert_eq!(c.set_pin(p, "1234"), 0);
+    assert_eq!(c.pin_token_with(p, "1234", 0, None), Err(0x02), "no permissions");
+    assert_eq!(c.pin_token_with(p, "1234", 0x08, None), Err(0x40), "no bio enrollment");
+    assert_eq!(c.pin_token_with(p, "1234", 0x80, None), Err(0x40), "unknown permission");
+
+    let mc = |c: &mut Client, rp: &str, user: &[u8], token: &[u8]| {
+        let params = with_pin_auth(make_credential_params(rp, user, "u", true, &[]), (8, 9), p, token, &[0x11; 32]);
+        c.ctap2(0x01, Some(params))
+    };
+    let ga = |c: &mut Client, rp: &str, token: &[u8]| {
+        let cdh = [0x22; 32];
+        c.ctap2(0x02, Some(with_pin_auth(get_assertion_params(rp, &cdh, &[]), (6, 7), p, token, &cdh))).0
+    };
+
+    // Permissions are checked, and mc / ga are used up by one operation.
+    let token = c.pin_token_with(p, "1234", PERM_GA, None).unwrap();
+    assert_eq!(mc(&mut c, "a.example", b"a", &token).0, 0x33, "no mc permission");
+    let token = c.pin_token_with(p, "1234", PERM_MC | PERM_GA, None).unwrap();
+    let (status, resp) = mc(&mut c, "a.example", b"a", &token);
+    assert_eq!(status, 0);
+    let a_cred = parse_make_credential("a.example", &resp);
+    assert_eq!(ga(&mut c, "a.example", &token), 0x33, "token used up");
+    let token = c.pin_token_with(p, "1234", PERM_MC, None).unwrap();
+    assert_eq!(mc(&mut c, "b.example", b"b", &token).0, 0);
+
+    // An RP-bound token only works for that RP.
+    let token = c.pin_token_with(p, "1234", PERM_GA, Some("a.example")).unwrap();
+    assert_eq!(ga(&mut c, "b.example", &token), 0x33);
+    assert_eq!(ga(&mut c, "a.example", &token), 0);
+
+    // Large-blob-write survives a getAssertion, so the platform can then store a blob.
+    let token = c.pin_token_with(p, "1234", PERM_GA | PERM_LBW, None).unwrap();
+    assert_eq!(ga(&mut c, "a.example", &token), 0);
+    assert_eq!(c.blob_write_all(&serialized_blob_array(&[b"cert"]), Some((p, &token))), 0);
+
+    // A cm token bound to an RP reaches only that RP's credentials.
+    let token = c.pin_token_with(p, "1234", PERM_CM, Some("a.example")).unwrap();
+    let auth = Some((p, token.as_slice()));
+    assert_eq!(c.cred_mgmt(0x0A, 1, None, auth).0, 0x33, "metadata needs an unbound token");
+    assert_eq!(c.cred_mgmt(0x0A, 2, None, auth).0, 0x33, "so does listing RPs");
+    let rp = |id: &str| Some(map(vec![(int(1), bytes(&sha256(id.as_bytes())))]));
+    assert_eq!(c.cred_mgmt(0x0A, 4, rp("b.example"), auth).0, 0x33);
+    assert_eq!(c.cred_mgmt(0x0A, 4, rp("a.example"), auth).0, 0);
+    let unbound = c.pin_token_with(p, "1234", PERM_CM, None).unwrap();
+    let (status, b_list) = c.cred_mgmt(0x0A, 4, rp("b.example"), Some((p, &unbound)));
+    assert_eq!(status, 0);
+    let b_id = get(&b_list, 7).unwrap().clone();
+    let token = c.pin_token_with(p, "1234", PERM_CM, Some("a.example")).unwrap();
+    assert_eq!(c.cred_mgmt(0x0A, 6, Some(map(vec![(int(2), b_id)])), Some((p, &token))).0, 0x33, "delete on another RP");
+    assert_eq!(c.cred_mgmt(0x0A, 6, Some(map(vec![(int(2), credential_descriptor(&a_cred.id))])), Some((p, &token))).0, 0);
+
+    // getPinToken may not carry 2.1 parameters.
+    let (cose, secret) = c.key_agreement(p);
+    let pin_hash_enc = p.encrypt(&secret, &sha256(b"1234")[..16]);
+    let (status, _) = c.client_pin(p, 5, vec![(int(3), cose), (int(6), bytes(&pin_hash_enc)), (int(9), int(1))]);
+    assert_eq!(status, 0x02);
+}
+
+#[test]
+fn ctap21_make_cred_uv_not_required_and_selection() {
+    let p = PinProtocol::V1;
+    let mut c = Client::new(Arc::new(AutoPresence));
+    assert_eq!(c.ctap2(0x0B, None).0, 0, "authenticatorSelection");
+    assert_eq!(c.set_pin(p, "1234"), 0);
+    let (status, resp) = c.ctap2(0x01, Some(make_credential_params("example.com", b"u", "u", false, &[])));
+    assert_eq!(status, 0, "non-discoverable credentials don't need the PIN");
+    assert_eq!(parse_make_credential("example.com", &resp).flags, 0x41, "UP | AT, no UV");
+    assert_eq!(c.ctap2(0x01, Some(make_credential_params("example.com", b"u", "u", true, &[]))).0, 0x36);
+
+    let (status, resp) = c.client_pin(p, 1, vec![]);
+    assert_eq!((status, get(&resp, 4)), (0, Some(&Value::Bool(false))), "powerCycleState");
+
+    let mut denied = Client::new(Arc::new(Deny));
+    assert_eq!(denied.ctap2(0x0B, None).0, 0x27);
+}
+
+#[test]
+fn ctap21_authenticator_config() {
+    let p = PinProtocol::V2;
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let set_min = |len: Option<i64>, rp_ids: Option<&[&str]>, force: Option<bool>| {
+        let mut entries = Vec::new();
+        if let Some(l) = len {
+            entries.push((int(1), int(l)));
+        }
+        if let Some(ids) = rp_ids {
+            entries.push((int(2), Value::Array(ids.iter().map(|id| text(id)).collect())));
+        }
+        if let Some(f) = force {
+            entries.push((int(3), Value::Bool(f)));
+        }
+        Some(map(entries))
+    };
+
+    // Without a PIN, configuration needs no authentication.
+    assert_eq!(c.config(0x03, set_min(Some(6), None, None), None), 0);
+    assert_eq!(get(&c.info(), 0x0D), Some(&int(6)));
+    assert_eq!(c.config(0x03, set_min(None, None, Some(true)), None), 0x35, "forcing a change needs a PIN");
+    assert_eq!(c.set_pin(p, "12345"), 0x37, "shorter than the minimum");
+    assert_eq!(c.set_pin(p, "123456"), 0);
+
+    // With a PIN, it needs a token with the acfg permission.
+    assert_eq!(c.config(0x02, None, None), 0x36);
+    let legacy = c.pin_token(p, "123456").unwrap();
+    assert_eq!(c.config(0x02, None, Some((p, &legacy))), 0x33);
+    let token = c.pin_token_with(p, "123456", PERM_ACFG, None).unwrap();
+    let acfg = Some((p, token.as_slice()));
+    assert_eq!(c.config(0x01, None, acfg), 0x3E, "no enterprise attestation");
+
+    // alwaysUv: every operation needs the PIN, and U2F is off.
+    assert_eq!(c.config(0x02, None, acfg), 0);
+    let info = c.info();
+    assert_eq!(info_option(&info, "alwaysUv"), Some(true));
+    assert_eq!(info_option(&info, "makeCredUvNotRqd"), Some(false));
+    assert!(!get(&info, 1).unwrap().as_array().unwrap().contains(&text("U2F_V2")));
+    assert_eq!(c.ctap2(0x01, Some(make_credential_params("example.com", b"u", "u", false, &[]))).0, 0x36);
+    assert_eq!(c.ctap2(0x02, Some(get_assertion_params("example.com", &[0; 32], &[]))).0, 0x36);
+    assert_eq!(c.u2f(&[0, 3, 0, 0, 0]).1, 0x6D00);
+    assert_eq!(c.config(0x02, None, acfg), 0);
+    assert_eq!(info_option(&c.info(), "alwaysUv"), Some(false));
+    assert_eq!(c.u2f(&[0, 3, 0, 0, 0]).1, 0x9000);
+
+    // The minimum can only go up; raising it past the PIN's length forces a change.
+    assert_eq!(c.config(0x03, set_min(Some(5), None, None), acfg), 0x37);
+    assert_eq!(c.config(0x03, set_min(Some(8), Some(&["example.com"]), None), acfg), 0);
+    assert_eq!(get(&c.info(), 0x0C), Some(&Value::Bool(true)), "forcePINChange");
+    assert_eq!(c.pin_token(p, "123456"), Err(0x37), "no tokens until the PIN is changed");
+    assert_eq!(c.change_pin(p, "123456", "1234567"), 0x37, "still too short");
+    assert_eq!(c.change_pin(p, "123456", "abcdefgh"), 0);
+    assert_eq!(get(&c.info(), 0x0C), Some(&Value::Bool(false)));
+
+    // An explicit forced change must pick a different PIN.
+    let token = c.pin_token_with(p, "abcdefgh", PERM_ACFG, None).unwrap();
+    assert_eq!(c.config(0x03, set_min(None, None, Some(true)), Some((p, &token))), 0);
+    assert_eq!(c.change_pin(p, "abcdefgh", "abcdefgh"), 0x37);
+    assert_eq!(c.change_pin(p, "abcdefgh", "hgfedcba"), 0);
+
+    // minPinLength extension: only for RPs on the list.
+    let min_len_ext = || map(vec![(text("minPinLength"), Value::Bool(true))]);
+    for (rp, expected) in [("example.com", Some(map(vec![(text("minPinLength"), int(8))]))), ("other.example", None)] {
+        let params = with_extensions(make_credential_params(rp, b"m", "m", false, &[]), 6, min_len_ext());
+        let (status, resp) = c.ctap2(0x01, Some(params));
+        assert_eq!(status, 0);
+        assert_eq!(auth_data_extensions(get(&resp, 2).unwrap().as_bytes().unwrap()).1, expected, "{rp}");
+    }
+    let token = c.pin_token_with(p, "hgfedcba", PERM_ACFG, None).unwrap();
+    let nine: Vec<String> = (0..9).map(|i| format!("rp{i}.example")).collect();
+    let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
+    assert_eq!(c.config(0x03, set_min(None, Some(&nine), None), Some((p, &token))), 0x03, "too many RP IDs");
+
+    // Reset restores the defaults.
+    assert_eq!(c.ctap2(0x07, None).0, 0);
+    let info = c.info();
+    assert_eq!(get(&info, 0x0D), Some(&int(4)));
+    assert_eq!(info_option(&info, "alwaysUv"), Some(false));
 }

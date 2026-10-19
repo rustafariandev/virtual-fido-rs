@@ -16,6 +16,7 @@ from fido2.attestation import Attestation
 from fido2.ctap import CtapError
 from fido2.ctap2 import ClientPin, Ctap2
 from fido2.ctap2.blob import LargeBlobs
+from fido2.ctap2.config import Config
 from fido2.ctap2.credman import CredentialManagement
 from fido2.ctap2.extensions import (
     CredBlobExtension,
@@ -78,9 +79,12 @@ for proto_cls in (PinProtocolV1, PinProtocolV2):
 
     user = {"id": os.urandom(8), "name": "alice", "displayName": "Alice"}
     cdh = hashlib.sha256(b"register").digest()
-    expect_error(CtapError.ERR.PUAT_REQUIRED, ctap.make_credential, cdh, rp, user, key_params)
+    # makeCredUvNotRqd: only discoverable credentials need the PIN.
+    expect_error(CtapError.ERR.PUAT_REQUIRED, ctap.make_credential, cdh, rp, user, key_params, options={"rk": True})
 
-    token = pin.get_pin_token("hunter22")
+    # A CTAP 2.1 token is used up by one makeCredential / getAssertion.
+    P = ClientPin.PERMISSION
+    token = pin.get_pin_token("hunter22", P.MAKE_CREDENTIAL, rp["id"])
     att = ctap.make_credential(
         cdh, rp, user, key_params, options={"rk": True},
         pin_uv_param=proto.authenticate(token, cdh), pin_uv_protocol=proto.VERSION,
@@ -90,6 +94,11 @@ for proto_cls in (PinProtocolV1, PinProtocolV2):
     cred = att.auth_data.credential_data
 
     cdh = hashlib.sha256(b"login").digest()
+    expect_error(
+        CtapError.ERR.PIN_AUTH_INVALID, ctap.get_assertion,
+        rp["id"], cdh, pin_uv_param=proto.authenticate(token, cdh), pin_uv_protocol=proto.VERSION,
+    )
+    token = pin.get_pin_token("hunter22", P.GET_ASSERTION, rp["id"])
     assertion = ctap.get_assertion(
         rp["id"], cdh, pin_uv_param=proto.authenticate(token, cdh), pin_uv_protocol=proto.VERSION
     )
@@ -137,7 +146,7 @@ assert level == 3
 proto = PinProtocolV2()
 pin = ClientPin(ctap, proto)
 pin.set_pin("hunter22")
-token = pin.get_pin_token("hunter22")
+token = pin.get_pin_token("hunter22", ClientPin.PERMISSION.MAKE_CREDENTIAL, rp["id"])
 cdh = hashlib.sha256(b"register").digest()
 att = ctap.make_credential(
     cdh, rp, {"id": os.urandom(8), "name": "carol"}, key_params,
@@ -150,6 +159,7 @@ cdh = hashlib.sha256(b"login").digest()
 allow = [{"type": "public-key", "id": cred.credential_id}]
 expect_error(CtapError.ERR.NO_CREDENTIALS, ctap.get_assertion, rp["id"], cdh, allow)
 expect_error(CtapError.ERR.NO_CREDENTIALS, ctap.get_assertion, rp["id"], cdh)
+token = pin.get_pin_token("hunter22", ClientPin.PERMISSION.GET_ASSERTION, rp["id"])
 assertion = ctap.get_assertion(
     rp["id"], cdh, allow, pin_uv_param=proto.authenticate(token, cdh), pin_uv_protocol=proto.VERSION
 )
@@ -161,10 +171,10 @@ ctap.reset()
 proto = PinProtocolV2()
 pin = ClientPin(ctap, proto)
 pin.set_pin("hunter22")
-token = pin.get_pin_token("hunter22")
 created = {}
 for rp_id, user_name in [("b.example", "alice"), ("b.example", "bob"), ("a.example", "carol")]:
     cdh = os.urandom(32)
+    token = pin.get_pin_token("hunter22", ClientPin.PERMISSION.MAKE_CREDENTIAL, rp_id)
     att = ctap.make_credential(
         cdh, {"id": rp_id, "name": rp_id.upper()}, {"id": user_name.encode(), "name": user_name}, key_params,
         options={"rk": True}, pin_uv_param=proto.authenticate(token, cdh), pin_uv_protocol=proto.VERSION,
@@ -172,7 +182,11 @@ for rp_id, user_name in [("b.example", "alice"), ("b.example", "bob"), ("a.examp
     created[user_name] = att.auth_data.credential_data
 
 R = CredentialManagement.RESULT
-cm = CredentialManagement(ctap, proto, token)
+expect_error(
+    CtapError.ERR.PIN_AUTH_INVALID,
+    CredentialManagement(ctap, proto, pin.get_pin_token("hunter22", ClientPin.PERMISSION.MAKE_CREDENTIAL)).get_metadata,
+)
+cm = CredentialManagement(ctap, proto, pin.get_pin_token("hunter22", ClientPin.PERMISSION.CREDENTIAL_MGMT))
 meta = cm.get_metadata()
 assert meta[R.EXISTING_CRED_COUNT] == 3, meta
 rps = cm.enumerate_rps()
@@ -241,6 +255,37 @@ cdh = os.urandom(32)
 assertion = ctap.get_assertion(rp["id"], cdh, [{"type": "public-key", "id": cred.credential_id}])
 assertion.verify(cdh, cred.public_key)
 print("Ed25519: packed self-attestation and assertion verify OK")
+
+# CTAP 2.1: authenticatorSelection and authenticatorConfig.
+ctap.reset()
+info = ctap.get_info()
+assert "FIDO_2_1" in info.versions and info.options["pinUvAuthToken"] and info.options["authnrCfg"]
+ctap.selection()
+Config(ctap).set_min_pin_length(6)  # no PIN yet, so no authentication needed
+assert ctap.get_info().min_pin_length == 6
+proto = PinProtocolV2()
+pin = ClientPin(ctap, proto)
+expect_error(CtapError.ERR.PIN_POLICY_VIOLATION, pin.set_pin, "12345")
+pin.set_pin("123456")
+config = Config(ctap, proto, pin.get_pin_token("123456", ClientPin.PERMISSION.AUTHENTICATOR_CFG))
+config.toggle_always_uv()
+info = ctap.get_info()
+assert info.options["alwaysUv"] is True and "U2F_V2" not in info.versions
+expect_error(CtapError.ERR.PUAT_REQUIRED, ctap.make_credential, os.urandom(32), rp, {"id": b"g"}, key_params)
+config.toggle_always_uv()
+config.set_min_pin_length(8, rp_ids=[rp["id"]])
+assert ctap.get_info().force_pin_change is True
+expect_error(CtapError.ERR.PIN_POLICY_VIOLATION, pin.get_pin_token, "123456", ClientPin.PERMISSION.GET_ASSERTION)
+pin.change_pin("123456", "12345678")
+assert ctap.get_info().force_pin_change is False
+token = pin.get_pin_token("12345678", ClientPin.PERMISSION.MAKE_CREDENTIAL, rp["id"])
+cdh = os.urandom(32)
+att = ctap.make_credential(
+    cdh, rp, {"id": b"h", "name": "h"}, key_params, extensions={"minPinLength": True},
+    pin_uv_param=proto.authenticate(token, cdh), pin_uv_protocol=proto.VERSION,
+)
+assert att.auth_data.extensions == {"minPinLength": 8}, att.auth_data.extensions
+print("CTAP 2.1: selection / alwaysUv / setMinPINLength / forced PIN change / minPinLength OK")
 
 dev.close()
 print("OK")

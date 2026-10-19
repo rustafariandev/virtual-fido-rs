@@ -2,6 +2,7 @@
 
 pub mod cbor;
 mod client_pin;
+mod config;
 mod cred_blob;
 mod cred_mgmt;
 mod cred_protect;
@@ -55,6 +56,7 @@ impl Status {
     pub const LARGE_BLOB_STORAGE_FULL: Status = Status(0x39);
     pub const INTEGRITY_FAILURE: Status = Status(0x3C);
     pub const INVALID_SUBCOMMAND: Status = Status(0x3E);
+    pub const UNAUTHORIZED_PERMISSION: Status = Status(0x40);
     pub const OTHER: Status = Status(0x7F);
 }
 
@@ -72,7 +74,9 @@ pub const CMD_CLIENT_PIN: u8 = 0x06;
 pub const CMD_RESET: u8 = 0x07;
 pub const CMD_GET_NEXT_ASSERTION: u8 = 0x08;
 pub const CMD_CREDENTIAL_MANAGEMENT: u8 = 0x0A;
+pub const CMD_SELECTION: u8 = 0x0B;
 pub const CMD_LARGE_BLOBS: u8 = 0x0C;
+pub const CMD_CONFIG: u8 = 0x0D;
 /// FIDO_2_1_PRE prototype of credential management.
 pub const CMD_CREDENTIAL_MANAGEMENT_PRE: u8 = 0x41;
 
@@ -102,7 +106,9 @@ pub(crate) fn dispatch(auth: &mut Authenticator, req: &[u8], ctx: &RequestCtx) -
         CMD_RESET => reset(auth, ctx),
         CMD_GET_NEXT_ASSERTION => get_assertion::next(auth, ctx),
         CMD_CREDENTIAL_MANAGEMENT | CMD_CREDENTIAL_MANAGEMENT_PRE => cred_mgmt::handle(auth, params),
+        CMD_SELECTION => selection(auth, ctx),
         CMD_LARGE_BLOBS => large_blobs::handle(auth, params),
+        CMD_CONFIG => config::handle(auth, params),
         _ => Err(Status::INVALID_COMMAND),
     };
     match result {
@@ -117,6 +123,13 @@ pub(crate) fn dispatch(auth: &mut Authenticator, req: &[u8], ctx: &RequestCtx) -
             vec![s.0]
         }
     }
+}
+
+/// authenticatorSelection: the platform asks the user to touch the key they want to
+/// use when several are plugged in.
+fn selection(auth: &mut Authenticator, ctx: &RequestCtx) -> CmdResult {
+    auth.require_presence(&PresenceRequest { kind: PresenceKind::Select, rp_id: None, user: None }, ctx)?;
+    Ok(None)
 }
 
 fn reset(auth: &mut Authenticator, ctx: &RequestCtx) -> CmdResult {

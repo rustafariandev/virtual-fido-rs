@@ -51,6 +51,8 @@ pub enum PresenceKind {
     Register,
     Authenticate,
     Reset,
+    /// Choose this key among several (authenticatorSelection).
+    Select,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +70,7 @@ impl fmt::Display for PresenceRequest {
             PresenceKind::Register => write!(f, "register a new credential on {site}")?,
             PresenceKind::Authenticate => write!(f, "sign in to {site}")?,
             PresenceKind::Reset => return write!(f, "RESET the authenticator, deleting all credentials"),
+            PresenceKind::Select => return write!(f, "select this security key"),
         }
         if let Some(user) = &self.user {
             write!(f, " as {user}")?;

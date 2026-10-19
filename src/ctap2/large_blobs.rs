@@ -7,7 +7,7 @@ use ciborium::Value;
 use zeroize::Zeroizing;
 
 use super::cbor::{self, as_bool, as_bytes, as_int, as_map, bytes, get, get_text, int, map, require};
-use super::client_pin::verify_pin_token;
+use super::client_pin::{use_pin_token, PERM_LARGE_BLOB_WRITE};
 use super::{CmdResult, Status};
 use crate::authenticator::{Authenticator, MAX_MSG_SIZE};
 use crate::crypto::{self, random_bytes};
@@ -107,7 +107,7 @@ fn write(
         return Err(Status::INVALID_SEQ);
     }
 
-    // Writes need the PIN once one is set:
+    // Writes need a token with the large-blob-write permission once a PIN is set:
     // pinUvAuthParam = authenticate(token, 32 x 0xff || 0x0c 0x00 || u32le(offset) || SHA-256(fragment)).
     if auth.store.pin()?.is_some() {
         let pin_auth = as_bytes(get(m, 0x05).ok_or(Status::PIN_REQUIRED)?)?;
@@ -115,7 +115,7 @@ fn write(
         msg.extend_from_slice(&[0x0c, 0x00]);
         msg.extend_from_slice(&(offset as u32).to_le_bytes());
         msg.extend_from_slice(&crypto::sha256(fragment));
-        verify_pin_token(auth, get(m, 0x06), &msg, pin_auth)?;
+        use_pin_token(auth, get(m, 0x06), &msg, pin_auth, PERM_LARGE_BLOB_WRITE, None)?;
     }
 
     let pending = auth.large_blob_write.as_mut().expect("checked above");

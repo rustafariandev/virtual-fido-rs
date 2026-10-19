@@ -71,6 +71,10 @@ fn process(auth: &mut Authenticator, apdu: &[u8]) -> Result<Vec<u8>, u16> {
     if cla != 0 {
         return Err(SW_CLA_NOT_SUPPORTED);
     }
+    // U2F cannot verify the user, so alwaysUv turns it off.
+    if auth.store.config().map_err(internal)?.always_uv {
+        return Err(SW_INS_NOT_SUPPORTED);
+    }
     match ins {
         INS_REGISTER => register(auth, data),
         INS_AUTHENTICATE => authenticate(auth, p1, data),

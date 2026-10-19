@@ -1,15 +1,15 @@
 //! authenticatorCredentialManagement (0x0A, and 0x41, the FIDO_2_1_PRE prototype with
 //! the same layout): list, delete and rename resident credentials.
 //!
-//! Requests are authorized by the PIN token from clientPIN getPinToken. CTAP 2.1's
-//! permission-scoped tokens are not implemented, so any current PIN token works.
+//! Requests need a pinUvAuthToken with the credential management (cm) permission. A
+//! token bound to an RP can only list, delete or update that RP's credentials.
 
 use std::collections::BTreeMap;
 
 use ciborium::Value;
 
 use super::cbor::{self, as_bytes, as_int, as_map, bytes, get, get_text, int, map, require, text};
-use super::client_pin::verify_pin_token;
+use super::client_pin::{use_pin_token, PERM_CREDENTIAL_MGMT};
 use super::{CmdResult, Status};
 use crate::authenticator::Authenticator;
 use crate::store::Credential;
@@ -61,7 +61,10 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8]) -> CmdResult {
     if let Some(p) = sub_params {
         msg.extend(cbor::encode(p));
     }
-    verify_pin_token(auth, get(&m, 0x03), &msg, pin_auth)?;
+    use_pin_token(auth, get(&m, 0x03), &msg, pin_auth, PERM_CREDENTIAL_MGMT, None)?;
+    if matches!(sub, SUB_GET_CREDS_METADATA | SUB_ENUMERATE_RPS_BEGIN) && auth.pin.token_rp_bound() {
+        return Err(Status::PIN_AUTH_INVALID);
+    }
 
     match sub {
         SUB_GET_CREDS_METADATA => {
@@ -87,6 +90,9 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8]) -> CmdResult {
             let p = as_map(require(sub_params)?)?;
             let rp_id_hash: [u8; 32] =
                 as_bytes(require(get(p, 0x01))?)?.try_into().map_err(|_| Status::INVALID_PARAMETER)?;
+            if !auth.pin.token_allows_rp(&rp_id_hash) {
+                return Err(Status::PIN_AUTH_INVALID);
+            }
             let mut creds: Vec<Credential> =
                 auth.store.list_by_rp(&rp_id_hash)?.into_iter().filter(|c| c.discoverable).collect();
             if creds.is_empty() {
@@ -101,9 +107,11 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8]) -> CmdResult {
         }
         SUB_DELETE_CREDENTIAL => {
             let id = credential_id(sub_params)?;
-            if !auth.store.delete(id)? {
-                return Err(Status::NO_CREDENTIALS);
+            let cred = auth.store.get(id)?.ok_or(Status::NO_CREDENTIALS)?;
+            if !auth.pin.token_allows_rp(&cred.rp_id_hash) {
+                return Err(Status::PIN_AUTH_INVALID);
             }
+            auth.store.delete(id)?;
             log::info!("deleted credential via credential management");
             Ok(None)
         }
@@ -111,6 +119,9 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8]) -> CmdResult {
             let id = credential_id(sub_params)?;
             let user = as_map(require(get(as_map(require(sub_params)?)?, 0x03))?)?;
             let mut cred = auth.store.get(id)?.filter(|c| c.discoverable).ok_or(Status::NO_CREDENTIALS)?;
+            if !auth.pin.token_allows_rp(&cred.rp_id_hash) {
+                return Err(Status::PIN_AUTH_INVALID);
+            }
             if cred.user_id.as_deref() != Some(as_bytes(require(get_text(user, "id"))?)?) {
                 return Err(Status::INVALID_PARAMETER);
             }

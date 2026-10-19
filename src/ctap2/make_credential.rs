@@ -1,6 +1,6 @@
 use super::cbor::{self, as_array, as_bool, as_bytes, as_int, as_map, as_text, bytes, get, get_text, int, map, require, text};
-use super::client_pin::verify_pin_uv_auth;
-use super::{cred_blob, cred_mgmt, cred_protect, hmac_secret, large_blobs};
+use super::client_pin::{verify_pin_uv_auth, PERM_MAKE_CREDENTIAL};
+use super::{config, cred_blob, cred_mgmt, cred_protect, hmac_secret, large_blobs};
 use super::{CmdResult, Status, FLAG_AT, FLAG_ED, FLAG_UP, FLAG_UV};
 use crate::authenticator::{now_millis, Authenticator, RequestCtx};
 use crate::crypto::{self, Algorithm};
@@ -44,7 +44,8 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         for (k, v) in as_map(opts)? {
             match as_text(k)? {
                 "rk" => rk = as_bool(v)?,
-                "uv" if as_bool(v)? => return Err(Status::UNSUPPORTED_OPTION),
+                // No built-in user verification: only the PIN (pinUvAuthParam) verifies.
+                "uv" if as_bool(v)? => return Err(Status::INVALID_OPTION),
                 "up" if !as_bool(v)? => return Err(Status::INVALID_OPTION),
                 _ => {}
             }
@@ -65,9 +66,25 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         rp_id: Some(rp_id.clone()),
         user: user_display_name.clone().or_else(|| user_name.clone()),
     };
-    let uv = verify_pin_uv_auth(auth, get(&m, 0x08), get(&m, 0x09), client_data_hash, &presence, ctx)?;
-    if !uv && auth.store.pin()?.is_some() {
-        return Err(Status::PIN_REQUIRED);
+    let uv = verify_pin_uv_auth(
+        auth,
+        get(&m, 0x08),
+        get(&m, 0x09),
+        client_data_hash,
+        PERM_MAKE_CREDENTIAL,
+        &rp_id,
+        &presence,
+        ctx,
+    )?;
+    if !uv {
+        let pin_set = auth.store.pin()?.is_some();
+        if auth.store.config()?.always_uv {
+            return Err(if pin_set { Status::PIN_REQUIRED } else { Status::PIN_NOT_SET });
+        }
+        // makeCredUvNotRqd: only discoverable credentials need the PIN once one is set.
+        if pin_set && rk {
+            return Err(Status::PIN_REQUIRED);
+        }
     }
 
     let rp_id_hash = crypto::sha256(rp_id.as_bytes());
@@ -113,6 +130,9 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
     if cred_blob_requested.is_some() {
         extensions.push(cred_blob::creation_output(cred_blob.is_some()));
     }
+    if let Some(output) = config::min_pin_length_output(auth, get(&m, 0x06), &rp_id)? {
+        extensions.push(output);
+    }
 
     let mut auth_data = Vec::with_capacity(37 + 18 + id.len() + cose_key.len());
     auth_data.extend_from_slice(&rp_id_hash);
@@ -153,6 +173,10 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         cred_blob,
         algorithm,
     })?;
+
+    if uv {
+        auth.pin.consume_mc_ga_permissions();
+    }
 
     let mut response = vec![
         (int(0x01), text("packed")),

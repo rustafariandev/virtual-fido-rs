@@ -4,18 +4,21 @@ A software FIDO2 / U2F security key for Linux. It creates a real USB HID authent
 through `/dev/uhid`, so browsers (WebAuthn), libfido2, `ssh-keygen -t ecdsa-sk` and
 anything else that talks to hardware keys will see it as a plugged-in key.
 
-Supported:
+Supported (CTAP 2.1, also advertising 2.0 and the 2.1 preview for older clients):
 
 - CTAPHID transport (keepalive, cancel, multiple channels)
 - CTAP2 `getInfo`, `makeCredential`, `getAssertion`, `getNextAssertion`, `reset`,
-  `clientPIN` (PIN/UV auth protocols 1 and 2), `credentialManagement`, `largeBlobs`
-- extensions: `hmac-secret`, `credProtect`, `largeBlobKey`, `credBlob`
+  `selection`, `clientPIN` (PIN/UV auth protocols 1 and 2, permission-scoped
+  tokens), `credentialManagement`, `largeBlobs`, `authenticatorConfig`
+  (`alwaysUv`, `setMinPINLength`)
+- extensions: `hmac-secret`, `credProtect`, `largeBlobKey`, `credBlob`, `minPinLength`
 - resident (discoverable) keys; ES256 and Ed25519 credentials with packed
   self-attestation
 - CTAP1/U2F `REGISTER` / `AUTHENTICATE` / `VERSION` (ES256 credentials only)
 
-Not supported yet: other extensions (`minPinLength`, …), CTAP 2.1 permission-scoped
-PIN tokens, `authenticatorConfig`.
+Not supported: built-in user verification and bio enrollment (there's no biometric
+sensor; the PIN is the only verification), enterprise attestation, and the
+reset-within-10-seconds-of-power-up rule.
 
 > **Security note.** This is a *software* key: private keys live in a file (or in
 > memory) on this machine, not in tamper-resistant hardware. Anyone who gets the
@@ -69,14 +72,35 @@ Set, change and use a PIN with any FIDO2 client, for example `fido2-token -S /de
 (set), `fido2-token -C /dev/hidrawN` (change), or your browser's security-key settings.
 Once a PIN is set:
 
-- creating a credential requires it (the key answers `PIN_REQUIRED` until the client
-  sends a PIN-derived token), and the credential is marked user-verified;
+- creating a *discoverable* credential (passkey) requires it, and the credential is
+  marked user-verified; non-discoverable credentials can still be created without it
+  (`makeCredUvNotRqd`), unless `alwaysUv` is on;
 - signing in works with or without it; with it, the assertion is marked user-verified;
 - 8 wrong guesses in total block the PIN until the key is reset (which deletes all
   credentials); after 3 wrong guesses in a row, restart virtual-fido to try again.
 
+Clients exchange the PIN for a short-lived token scoped to what they asked for:
+creating or using credentials (optionally for one site only), credential management,
+large-blob writes or configuration. A token must be used within 30 seconds, stops
+working after 10 minutes, and a create / sign-in token is used up by one operation.
+
 Only a truncated SHA-256 of the PIN is stored, along with the retry counter, in the
 credential store. With `--store memory` the PIN disappears on exit like everything else.
+
+## Configuration
+
+With the PIN (or freely, before one is set), clients that support `authenticatorConfig`
+can change two settings, stored in the credential store and restored to defaults by reset:
+
+- **alwaysUv**: every create and sign-in needs the PIN, and U2F is turned off since it
+  can't check one.
+- **Minimum PIN length** (default 4 code points, can only go up). If the current PIN
+  is now too short, it must be changed before it can be used again; a client can also
+  force a change explicitly. The minimum can be shared with up to 8 named sites through
+  the `minPinLength` extension.
+
+For example, with python-fido2: `Config(ctap, protocol, token).toggle_always_uv()` or
+`.set_min_pin_length(8)`.
 
 ## hmac-secret
 
@@ -122,9 +146,9 @@ stored; beyond that, new ones are refused with `KEY_STORE_FULL` (re-registering 
 existing user replaces their credential and still works).
 
 Both the CTAP 2.1 command (`0x0A`) and the earlier `FIDO_2_1_PRE` prototype (`0x41`)
-are accepted. Requests are authorized with an ordinary PIN token, as on pre-2.1 keys,
-because CTAP 2.1 permission-scoped tokens aren't implemented: any client holding a
-current PIN token could also manage credentials.
+are accepted. Either way the client needs a PIN token with the credential-management
+permission; a token limited to one site can only see and change that site's
+credentials.
 
 ## Large blobs
 
