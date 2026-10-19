@@ -5,7 +5,7 @@ use super::{cred_blob, cred_protect, hmac_secret, large_blobs};
 use super::pin_protocol::PinProtocol;
 use super::CmdResult;
 use crate::authenticator::{Authenticator, MAX_MSG_SIZE};
-use crate::crypto::COSE_ALG_ES256;
+use crate::crypto::Algorithm;
 
 pub(super) fn handle(auth: &Authenticator) -> CmdResult {
     Ok(Some(map(vec![
@@ -34,7 +34,12 @@ pub(super) fn handle(auth: &Authenticator) -> CmdResult {
         (int(0x09), Value::Array(vec![text("usb")])),
         (
             int(0x0A),
-            Value::Array(vec![map(vec![(text("alg"), int(COSE_ALG_ES256)), (text("type"), text("public-key"))])]),
+            Value::Array(
+                Algorithm::SUPPORTED
+                    .iter()
+                    .map(|a| map(vec![(text("alg"), int(a.cose_id())), (text("type"), text("public-key"))]))
+                    .collect(),
+            ),
         ),
         (int(0x0B), int(large_blobs::MAX_SERIALIZED_SIZE as i64)),
         (int(0x0F), int(cred_blob::MAX_LEN as i64)),

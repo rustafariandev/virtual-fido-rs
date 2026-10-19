@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::crypto::Algorithm;
 use crate::error::{Error, Result};
 
 pub use file::{FileStore, KdfParams};
@@ -53,6 +54,9 @@ pub struct Credential {
     /// Small RP-supplied blob from the credBlob extension.
     #[serde(default, with = "serde_bytes")]
     pub cred_blob: Option<Vec<u8>>,
+    /// Signature algorithm of `private_key`. Absent in older stores, which were ES256 only.
+    #[serde(default)]
+    pub algorithm: Algorithm,
 }
 
 /// credProtect policy: when a credential may be used without user verification (PIN).
@@ -125,6 +129,7 @@ impl fmt::Debug for Credential {
             .field("sign_count", &self.sign_count)
             .field("discoverable", &self.discoverable)
             .field("cred_protect", &self.cred_protect)
+            .field("algorithm", &self.algorithm)
             .finish_non_exhaustive()
     }
 }

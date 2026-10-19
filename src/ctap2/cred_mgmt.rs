@@ -12,7 +12,6 @@ use super::cbor::{self, as_bytes, as_int, as_map, bytes, get, get_text, int, map
 use super::client_pin::verify_pin_token;
 use super::{CmdResult, Status};
 use crate::authenticator::Authenticator;
-use crate::crypto;
 use crate::store::Credential;
 
 /// Resident credential capacity reported to clients and enforced by makeCredential.
@@ -188,7 +187,7 @@ fn credential_response(cred: &Credential, total: Option<usize>) -> Result<Value,
     let mut entries = vec![
         (int(0x06), map(user)),
         (int(0x07), map(vec![(text("id"), bytes(&cred.id)), (text("type"), text("public-key"))])),
-        (int(0x08), crypto::cose_public_key(&cred.private_key)?),
+        (int(0x08), cred.algorithm.cose_public_key(&cred.private_key)?),
         (int(0x0A), int(u8::from(cred.cred_protect).into())),
     ];
     if let Some(n) = total {

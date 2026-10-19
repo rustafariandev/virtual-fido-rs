@@ -227,5 +227,20 @@ assertion = ctap.get_assertion(rp["id"], os.urandom(32), extensions={"credBlob":
 assert assertion.auth_data.extensions == {"credBlob": blob}, assertion.auth_data.extensions
 print("credBlob: store at creation / return on sign-in OK")
 
+# Ed25519: preferred by the RP, verified with python-fido2's own COSE / packed code.
+ctap.reset()
+assert {"alg": -8, "type": "public-key"} in ctap.get_info().algorithms
+cdh = os.urandom(32)
+att = ctap.make_credential(
+    cdh, rp, {"id": b"fred", "name": "fred"}, [{"type": "public-key", "alg": -8}, {"type": "public-key", "alg": -7}]
+)
+Attestation.for_type(att.fmt)().verify(att.att_statement, att.auth_data, cdh)
+cred = att.auth_data.credential_data
+assert cred.public_key[3] == -8, cred.public_key
+cdh = os.urandom(32)
+assertion = ctap.get_assertion(rp["id"], cdh, [{"type": "public-key", "id": cred.credential_id}])
+assertion.verify(cdh, cred.public_key)
+print("Ed25519: packed self-attestation and assertion verify OK")
+
 dev.close()
 print("OK")

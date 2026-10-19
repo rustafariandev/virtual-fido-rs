@@ -288,9 +288,9 @@ fn rejects_unsupported_algorithms_and_uv() {
         (int(1), bytes(&[0; 32])),
         (int(2), map(vec![(text("id"), text("example.com"))])),
         (int(3), map(vec![(text("id"), bytes(b"u"))])),
-        (int(4), Value::Array(vec![map(vec![(text("alg"), int(-8)), (text("type"), text("public-key"))])])),
+        (int(4), Value::Array(vec![map(vec![(text("alg"), int(-35)), (text("type"), text("public-key"))])])),
     ]);
-    assert_eq!(c.ctap2(0x01, Some(params)).0, 0x26);
+    assert_eq!(c.ctap2(0x01, Some(params)).0, 0x26, "ES384 is not supported");
     let params = map(vec![(int(1), text("example.com")), (int(2), bytes(&[0; 32])), (int(5), map(vec![(text("uv"), Value::Bool(true))]))]);
     assert_eq!(c.ctap2(0x02, Some(params)).0, 0x2B);
     assert_eq!(c.ctap2(0x42, None).0, 0x01);
@@ -1121,4 +1121,87 @@ fn cred_blob() {
 
     let bad = with_extensions(make_credential_params("example.com", b"b", "u", true, &[]), 6, map(vec![(text("credBlob"), Value::Bool(true))]));
     assert_eq!(c.ctap2(0x01, Some(bad)).0, 0x11, "credBlob must be bytes");
+}
+
+// ---- Ed25519 ----------------------------------------------------------------------
+
+fn make_credential_with_algs(rp: &str, user: &[u8], rk: bool, algs: &[i64]) -> Value {
+    let Value::Map(mut entries) = make_credential_params(rp, user, "u", rk, &[]) else { unreachable!() };
+    entries.retain(|(k, _)| k != &int(4));
+    let params = algs.iter().map(|a| map(vec![(text("alg"), int(*a)), (text("type"), text("public-key"))]));
+    entries.push((int(4), Value::Array(params.collect())));
+    map(entries)
+}
+
+/// Returns (credential ID, Ed25519 public key) after checking the COSE key and the
+/// self-attestation signature.
+fn parse_ed25519_credential(resp: &[(Value, Value)]) -> (Vec<u8>, ed25519_dalek::VerifyingKey) {
+    use ed25519_dalek::Verifier;
+    let ad = get(resp, 2).unwrap().as_bytes().unwrap();
+    let id_len = u16::from_be_bytes([ad[53], ad[54]]) as usize;
+    let id = ad[55..55 + id_len].to_vec();
+    let mut rest = &ad[55 + id_len..];
+    let cose: Value = ciborium::de::from_reader(&mut rest).unwrap();
+    assert_eq!(
+        cose,
+        map(vec![(int(1), int(1)), (int(3), int(-8)), (int(-1), int(6)), (int(-2), get(cose.as_map().unwrap(), -2).unwrap().clone())]),
+        "OKP / EdDSA / Ed25519 COSE key"
+    );
+    let x: [u8; 32] = get(cose.as_map().unwrap(), -2).unwrap().as_bytes().unwrap().as_slice().try_into().unwrap();
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&x).unwrap();
+
+    let att = get(resp, 3).unwrap().as_map().unwrap();
+    assert_eq!(get_text(att, "alg"), Some(&int(-8)));
+    let sig: [u8; 64] = get_text(att, "sig").unwrap().as_bytes().unwrap().as_slice().try_into().expect("raw 64-byte signature");
+    key.verify(&[ad, &[0x11u8; 32][..]].concat(), &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+    (id, key)
+}
+
+#[test]
+fn ed25519_credentials() {
+    use ed25519_dalek::Verifier;
+    let mut c = Client::new(Arc::new(AutoPresence));
+    let (_, info) = c.ctap2(0x04, None);
+    let algs: Vec<_> = get(&info, 0x0A).unwrap().as_array().unwrap().iter().map(|a| get_text(a.as_map().unwrap(), "alg").unwrap().clone()).collect();
+    assert_eq!(algs, [int(-7), int(-8)]);
+
+    // The RP's first supported preference wins.
+    let (status, resp) = c.ctap2(0x01, Some(make_credential_with_algs("example.com", b"ed", true, &[-35, -8, -7])));
+    assert_eq!(status, 0);
+    let (id, key) = parse_ed25519_credential(&resp);
+    let (_, resp) = c.ctap2(0x01, Some(make_credential_with_algs("example.com", b"ec", true, &[-7, -8])));
+    let ec = parse_make_credential("example.com", &resp);
+
+    for _ in 0..2 {
+        let cdh = [0x42; 32];
+        let (status, resp) = c.ctap2(0x02, Some(get_assertion_params("example.com", &cdh, &[&id])));
+        assert_eq!(status, 0);
+        let ad = get(&resp, 2).unwrap().as_bytes().unwrap();
+        let sig: [u8; 64] = get(&resp, 3).unwrap().as_bytes().unwrap().as_slice().try_into().unwrap();
+        key.verify(&[ad, &cdh[..]].concat(), &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+    }
+    // Discovery returns both kinds, each signed with its own algorithm.
+    let cdh = [0x43; 32];
+    let (_, first) = c.ctap2(0x02, Some(get_assertion_params("example.com", &cdh, &[])));
+    verify_assertion(&ec.key, &first, &cdh);
+    let (_, second) = c.ctap2(0x08, None);
+    let ad = get(&second, 2).unwrap().as_bytes().unwrap();
+    let sig: [u8; 64] = get(&second, 3).unwrap().as_bytes().unwrap().as_slice().try_into().unwrap();
+    key.verify(&[ad, &cdh[..]].concat(), &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+
+    // U2F can only produce P-256 signatures, so the Ed25519 credential is unknown to it.
+    let app = sha256(b"example.com");
+    let apdu = |kh: &[u8]| [&[0, 2, 0x07, 0, (65 + kh.len()) as u8][..], &[0; 32], &app, &[kh.len() as u8], kh].concat();
+    assert_eq!(c.u2f(&apdu(&id)).1, 0x6A80);
+    assert_eq!(c.u2f(&apdu(&ec.id)).1, 0x6985);
+
+    // Credential management reports the Ed25519 COSE key.
+    let p = PinProtocol::V2;
+    assert_eq!(c.set_pin(p, "1234"), 0);
+    let token = c.pin_token(p, "1234").unwrap();
+    let (_, listed) = c.cred_mgmt(0x0A, 4, Some(map(vec![(int(1), bytes(&app))])), Some((p, &token)));
+    let (_, next) = c.cred_mgmt(0x0A, 5, None, None);
+    let ed_entry = if get(&listed, 7) == Some(&credential_descriptor(&id)) { listed } else { next };
+    let cose = get(&ed_entry, 8).unwrap().as_map().unwrap();
+    assert_eq!(get(cose, -2).unwrap().as_bytes().unwrap(), key.as_bytes());
 }

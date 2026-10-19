@@ -4,13 +4,18 @@ A software FIDO2 / U2F security key for Linux. It creates a real USB HID authent
 through `/dev/uhid`, so browsers (WebAuthn), libfido2, `ssh-keygen -t ecdsa-sk` and
 anything else that talks to hardware keys will see it as a plugged-in key.
 
-Supported: CTAPHID transport (keepalive, cancel, multiple channels), CTAP2 `getInfo`,
-`makeCredential`, `getAssertion`, `getNextAssertion`, `reset`, `credentialManagement`, `largeBlobs`, `clientPIN`
-(PIN/UV auth protocols 1 and 2), the `hmac-secret`, `credProtect`, `largeBlobKey` and
-`credBlob` extensions,
-resident (discoverable) keys, ES256 with packed self-attestation, and the CTAP1/U2F
-`REGISTER` / `AUTHENTICATE` / `VERSION` commands. Not supported yet: other extensions
-(`minPinLength`, …), CTAP 2.1 permission-scoped PIN tokens.
+Supported:
+
+- CTAPHID transport (keepalive, cancel, multiple channels)
+- CTAP2 `getInfo`, `makeCredential`, `getAssertion`, `getNextAssertion`, `reset`,
+  `clientPIN` (PIN/UV auth protocols 1 and 2), `credentialManagement`, `largeBlobs`
+- extensions: `hmac-secret`, `credProtect`, `largeBlobKey`, `credBlob`
+- resident (discoverable) keys; ES256 and Ed25519 credentials with packed
+  self-attestation
+- CTAP1/U2F `REGISTER` / `AUTHENTICATE` / `VERSION` (ES256 credentials only)
+
+Not supported yet: other extensions (`minPinLength`, …), CTAP 2.1 permission-scoped
+PIN tokens, `authenticatorConfig`.
 
 > **Security note.** This is a *software* key: private keys live in a file (or in
 > memory) on this machine, not in tamper-resistant hardware. Anyone who gets the
@@ -144,6 +149,7 @@ configuration, not secrets.
 python3 scripts/smoke_test.py          # needs python-fido2 0.9.x
 fido2-token -L                         # dnf install fido2-tools
 ssh-keygen -t ecdsa-sk -O resident     # then: ssh-keygen -K
+ssh-keygen -t ed25519-sk               # Ed25519 works too
 ```
 
 or register and sign in at <https://webauthn.io>.

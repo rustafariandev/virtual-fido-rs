@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
 use crate::authenticator::{now_millis, Authenticator};
-use crate::crypto;
+use crate::crypto::{self, Algorithm};
 use crate::presence::{CancelToken, Presence, PresenceKind, PresenceRequest};
 use crate::store::{CredProtect, Credential};
 
@@ -92,13 +92,13 @@ fn register(auth: &mut Authenticator, data: &[u8]) -> Result<Vec<u8>, u16> {
     let app: [u8; 32] = app.try_into().unwrap();
     check_presence(auth, PresenceKind::Register, app)?;
 
-    let private_key = crypto::generate_private_key();
+    let private_key = Algorithm::Es256.generate_private_key();
     let public_key = crypto::public_key_uncompressed(&private_key).map_err(internal)?;
     let key_handle = crypto::random_bytes::<KEY_HANDLE_LEN>().to_vec();
     let attestation = auth.attestation().map_err(internal)?;
 
     let signed = [&[0x00][..], &app, challenge, &key_handle, &public_key].concat();
-    let signature = crypto::sign(&attestation.private_key, &signed).map_err(internal)?;
+    let signature = Algorithm::Es256.sign(&attestation.private_key, &signed).map_err(internal)?;
 
     auth.store
         .put(Credential {
@@ -117,6 +117,7 @@ fn register(auth: &mut Authenticator, data: &[u8]) -> Result<Vec<u8>, u16> {
             cred_protect: CredProtect::UvOptional,
             large_blob_key: None,
             cred_blob: None,
+            algorithm: Algorithm::Es256,
         })
         .map_err(internal)?;
     log::info!("registered U2F credential");
@@ -141,8 +142,9 @@ fn authenticate(auth: &mut Authenticator, mode: u8, data: &[u8]) -> Result<Vec<u
         .store
         .get(key_handle)
         .map_err(internal)?
-        // U2F cannot verify the user, so credProtect level 3 credentials look unknown.
-        .filter(|c| c.rp_id_hash == app && c.cred_protect.allows(false, true))
+        // U2F signatures are ECDSA P-256, and U2F cannot verify the user: Ed25519 and
+        // credProtect level 3 credentials look unknown.
+        .filter(|c| c.rp_id_hash == app && c.algorithm == Algorithm::Es256 && c.cred_protect.allows(false, true))
         .ok_or(SW_WRONG_DATA)?;
 
     let flags = match mode {
@@ -157,7 +159,7 @@ fn authenticate(auth: &mut Authenticator, mode: u8, data: &[u8]) -> Result<Vec<u
     let counter = auth.store.increment_counter(&cred.id).map_err(internal)?;
     let counter = counter.to_be_bytes();
     let signed = [&app[..], &[flags], &counter, challenge].concat();
-    let signature = crypto::sign(&cred.private_key, &signed).map_err(internal)?;
+    let signature = Algorithm::Es256.sign(&cred.private_key, &signed).map_err(internal)?;
     log::info!("signed U2F authentication");
 
     let mut out = vec![flags];

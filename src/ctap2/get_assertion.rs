@@ -158,7 +158,7 @@ fn assertion(
     if !extensions.is_empty() {
         auth_data.extend(cbor::encode(&map(extensions)));
     }
-    let signature = crypto::sign(&cred.private_key, &[auth_data.as_slice(), client_data_hash].concat())?;
+    let signature = cred.algorithm.sign(&cred.private_key, &[auth_data.as_slice(), client_data_hash].concat())?;
 
     let mut entries = vec![
         (int(0x01), map(vec![(text("id"), bytes(&cred.id)), (text("type"), text("public-key"))])),

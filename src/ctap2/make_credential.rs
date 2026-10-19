@@ -3,7 +3,7 @@ use super::client_pin::verify_pin_uv_auth;
 use super::{cred_blob, cred_mgmt, cred_protect, hmac_secret, large_blobs};
 use super::{CmdResult, Status, FLAG_AT, FLAG_ED, FLAG_UP, FLAG_UV};
 use crate::authenticator::{now_millis, Authenticator, RequestCtx};
-use crate::crypto::{self, COSE_ALG_ES256};
+use crate::crypto::{self, Algorithm};
 use crate::presence::{PresenceKind, PresenceRequest};
 use crate::store::{CredProtect, Credential};
 
@@ -27,16 +27,17 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
     let user_name = cbor::opt_text(user, "name")?;
     let user_display_name = cbor::opt_text(user, "displayName")?;
 
-    let mut es256 = false;
+    // The RP lists algorithms in order of preference; use the first we support.
+    let mut algorithm = None;
     for p in as_array(require(get(&m, 0x04))?)? {
         let p = as_map(p)?;
         let ty = as_text(require(get_text(p, "type"))?)?;
         let alg = as_int(require(get_text(p, "alg"))?)?;
-        es256 |= ty == "public-key" && alg == COSE_ALG_ES256 as i128;
+        if ty == "public-key" && algorithm.is_none() {
+            algorithm = Algorithm::from_cose(alg);
+        }
     }
-    if !es256 {
-        return Err(Status::UNSUPPORTED_ALGORITHM);
-    }
+    let algorithm = algorithm.ok_or(Status::UNSUPPORTED_ALGORITHM)?;
 
     let mut rk = false;
     if let Some(opts) = get(&m, 0x07) {
@@ -96,9 +97,9 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
 
     auth.require_presence(&presence, ctx)?;
 
-    let private_key = crypto::generate_private_key();
+    let private_key = algorithm.generate_private_key();
     let id = crypto::random_bytes::<CREDENTIAL_ID_LEN>().to_vec();
-    let cose_key = cbor::encode(&crypto::cose_public_key(&private_key)?);
+    let cose_key = cbor::encode(&algorithm.cose_public_key(&private_key)?);
 
     let mut extensions = Vec::new();
     if let Some(policy) = cred_protect {
@@ -127,10 +128,10 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
     }
 
     // Packed self-attestation: signed by the new credential key itself.
-    let signature = crypto::sign(&private_key, &[auth_data.as_slice(), client_data_hash].concat())?;
+    let signature = algorithm.sign(&private_key, &[auth_data.as_slice(), client_data_hash].concat())?;
 
     log::info!(
-        "created {} credential for {rp_id} ({})",
+        "created {} {algorithm:?} credential for {rp_id} ({})",
         if rk { "discoverable" } else { "non-discoverable" },
         user_name.as_deref().unwrap_or("unnamed user")
     );
@@ -150,12 +151,13 @@ pub(super) fn handle(auth: &mut Authenticator, params: &[u8], ctx: &RequestCtx) 
         cred_protect: cred_protect.unwrap_or(CredProtect::UvOptional),
         large_blob_key: large_blob_key.clone(),
         cred_blob,
+        algorithm,
     })?;
 
     let mut response = vec![
         (int(0x01), text("packed")),
         (int(0x02), bytes(&auth_data)),
-        (int(0x03), map(vec![(text("alg"), int(COSE_ALG_ES256)), (text("sig"), bytes(&signature))])),
+        (int(0x03), map(vec![(text("alg"), int(algorithm.cose_id())), (text("sig"), bytes(&signature))])),
     ];
     if let Some(key) = &large_blob_key {
         response.push((int(0x05), bytes(key)));
